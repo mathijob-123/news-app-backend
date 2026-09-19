@@ -26,10 +26,15 @@ export interface LocationCoordinates {
   radiusMeters?: number;
 }
 
+export type UserRole = 'user' | 'creator' | 'admin';
+
 export interface User {
   id: string;
   handle: string;
   displayName: string;
+  email?: string;
+  role: UserRole;
+  authProvider?: 'local' | 'google';
   avatar: string;
   bio: string;
   homeLocation: LocationCoordinates;
@@ -40,6 +45,29 @@ export interface User {
   followerCount: number;
   followingCount: number;
   walletId: string;
+  onboardingCompleted?: boolean;
+}
+
+export interface AuthSessionUser {
+  id: string;
+  handle: string;
+  displayName: string;
+  email: string;
+  role: UserRole;
+  avatar: string;
+  isCreator: boolean;
+  verified: boolean;
+  walletId: string;
+}
+
+export interface AuthResponse {
+  success: boolean;
+  token: string;
+  user: User;
+  wallet?: any;
+  message?: string;
+  isNewUser?: boolean;
+  isAdmin?: boolean;
 }
 
 export interface Comment {
@@ -84,6 +112,8 @@ export interface VideoPost {
 
   adminReviewStatus?: AdminReviewStatus;
   adminPayoutAmount?: number;
+  priceAward?: number;
+  rpmRate?: number;
   adminBountyAwarded?: number;
   adminDisbursedDate?: string;
   adminReviewerDesk?: string;

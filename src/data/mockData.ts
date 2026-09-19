@@ -4,6 +4,8 @@ export const CURRENT_USER: User = {
   id: 'usr_tn_001',
   handle: 'citizen_reporter',
   displayName: 'Citizen Journalist',
+  email: 'citizen@spotlight.local',
+  role: 'creator',
   avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80',
   bio: 'Citizen journalist reporting on civic, traffic, and community news across Chennai & Tiruvallur Districts.',
   homeLocation: {

@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { pool } from '../config/db.js';
+import { r2Client, R2_BUCKET_NAME, R2_PUBLIC_URL, isR2Configured } from '../config/r2.js';
 import { CURRENT_USER, INITIAL_POSTS, INITIAL_WALLET, INITIAL_TRANSACTIONS, INITIAL_COMMENTS } from '../data/mockData.js';
 import type { VideoPost, User, Wallet, Transaction, Comment, AdminStats } from '../types.js';
 
@@ -42,6 +45,8 @@ function mapPostRow(row: any): VideoPost {
     isBreaking: row.is_breaking,
     adminReviewStatus: row.admin_review_status,
     adminPayoutAmount: Number(row.admin_payout_amount || 0),
+    priceAward: Number(row.price_award || row.admin_payout_amount || 0),
+    rpmRate: Number(row.rpm_rate || 350.0),
     adminBountyAwarded: Number(row.admin_bounty_awarded || 0),
     adminDisbursedDate: row.admin_disbursed_date,
     adminReviewerDesk: row.admin_reviewer_desk,
@@ -55,6 +60,9 @@ function mapUserRow(row: any): User {
     id: row.id,
     handle: row.handle,
     displayName: row.display_name,
+    email: row.email || undefined,
+    role: (row.role as any) || 'user',
+    authProvider: (row.auth_provider as any) || 'local',
     avatar: row.avatar,
     bio: row.bio,
     homeLocation: typeof row.home_location === 'string' ? JSON.parse(row.home_location) : row.home_location,
@@ -107,7 +115,103 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
       dbStatus = `error: ${err.message}`;
     }
   }
-  res.json({ status: 'ok', database: dbStatus, timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    database: dbStatus,
+    r2Storage: isR2Configured ? 'configured' : 'missing_credentials',
+    r2Bucket: R2_BUCKET_NAME,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// --- CLOUDFLARE R2 UPLOAD ROUTES ---
+apiRouter.post('/upload/presign', async (req: Request, res: Response) => {
+  try {
+    const { filename, contentType, folder = 'videos' } = req.body;
+    if (!filename || !contentType) {
+      return res.status(400).json({ success: false, error: 'filename and contentType are required' });
+    }
+
+    if (!isR2Configured) {
+      return res.status(503).json({
+        success: false,
+        error: 'Cloudflare R2 is not fully configured. Please set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY in backend/.env'
+      });
+    }
+
+    const cleanFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const ext = cleanFilename.includes('.') ? cleanFilename.split('.').pop() : 'mp4';
+    const key = `${folder}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+    const command = new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+      ContentType: contentType,
+    });
+
+    // Presigned PUT URL valid for 15 minutes (900 seconds)
+    const uploadUrl = await getSignedUrl(r2Client, command, { expiresIn: 900 });
+    const publicUrl = R2_PUBLIC_URL ? `${R2_PUBLIC_URL.replace(/\/$/, '')}/${key}` : `https://${R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${key}`;
+
+    return res.json({
+      success: true,
+      uploadUrl,
+      publicUrl,
+      key
+    });
+  } catch (error: any) {
+    console.error('[R2 Presign Error]:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Direct server-side upload to R2 (bypasses browser CORS completely)
+apiRouter.post('/upload/direct', async (req: Request, res: Response) => {
+  try {
+    const { filename, contentType, fileBase64, folder = 'reports' } = req.body;
+    if (!filename || !contentType || !fileBase64) {
+      return res.status(400).json({ success: false, error: 'filename, contentType, and fileBase64 are required' });
+    }
+
+    if (!isR2Configured) {
+      return res.status(503).json({
+        success: false,
+        error: 'Cloudflare R2 is not fully configured in backend/.env'
+      });
+    }
+
+    const cleanFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const ext = cleanFilename.includes('.') ? cleanFilename.split('.').pop() : (contentType.startsWith('video') ? 'mp4' : 'jpg');
+    const key = `${folder}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+    const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(cleanBase64, 'base64');
+
+    await r2Client.send(
+      new PutObjectCommand({
+        Bucket: R2_BUCKET_NAME,
+        Key: key,
+        Body: buffer,
+        ContentType: contentType
+      })
+    );
+
+    const publicUrl = R2_PUBLIC_URL
+      ? `${R2_PUBLIC_URL.replace(/\/$/, '')}/${key}`
+      : `https://${R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${key}`;
+
+    console.log(`[R2 Direct Upload] File uploaded: ${publicUrl} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+
+    return res.json({
+      success: true,
+      publicUrl,
+      key,
+      sizeBytes: buffer.length
+    });
+  } catch (error: any) {
+    console.error('[R2 Direct Upload Error]:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // --- POSTS ROUTES ---
@@ -128,6 +232,19 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
   const p: VideoPost = req.body;
   if (!p.id) p.id = `post_${Date.now()}`;
   if (!p.createdAt) p.createdAt = new Date().toISOString();
+  // Every post is sent as a request to the admin before posted public
+  p.status = p.status || 'in_review';
+  p.adminReviewStatus = p.adminReviewStatus || 'pending_review';
+  p.priceAward = p.priceAward || 0;
+  p.rpmRate = p.rpmRate || 0;
+
+  // Always keep memPosts updated so fast lookups and in-memory fallbacks work
+  const mIdx = memPosts.findIndex((item) => item.id === p.id);
+  if (mIdx >= 0) {
+    memPosts[mIdx] = { ...memPosts[mIdx], ...p };
+  } else {
+    memPosts.unshift(p);
+  }
 
   if (hasDb) {
     try {
@@ -136,15 +253,22 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
           id, creator_id, creator_name, creator_handle, creator_avatar, creator_verified,
           type, media_url, thumbnail_url, headline, caption, category, location,
           source_citation, duration_seconds, status, is_breaking, admin_review_status,
-          admin_payout_amount, admin_bounty_awarded, created_at
+          admin_payout_amount, price_award, rpm_rate, admin_bounty_awarded, created_at
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
-        )`,
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+        ) ON CONFLICT (id) DO UPDATE SET
+          headline = EXCLUDED.headline,
+          caption = EXCLUDED.caption,
+          status = EXCLUDED.status,
+          admin_review_status = EXCLUDED.admin_review_status,
+          price_award = EXCLUDED.price_award,
+          rpm_rate = EXCLUDED.rpm_rate,
+          updated_at = NOW()`,
         [
           p.id, p.creatorId || 'usr_tn_001', p.creatorName, p.creatorHandle, p.creatorAvatar, p.creatorVerified || false,
           p.type || 'video', p.mediaUrl, p.thumbnailUrl, p.headline, p.caption, p.category, JSON.stringify(p.location),
-          p.sourceCitation || null, p.durationSeconds || 0, p.status || 'published', p.isBreaking || false,
-          p.adminReviewStatus || 'pending_review', p.adminPayoutAmount || 0, p.adminBountyAwarded || 0, p.createdAt
+          p.sourceCitation || null, p.durationSeconds || 0, p.status, p.isBreaking || false,
+          p.adminReviewStatus, p.adminPayoutAmount || 0, p.priceAward || 0, p.rpmRate || 350, p.adminBountyAwarded || 0, p.createdAt
         ]
       );
       return res.status(201).json({ success: true, data: p, source: 'supabase_postgres' });
@@ -153,7 +277,6 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
     }
   }
 
-  memPosts.unshift(p);
   res.status(201).json({ success: true, data: p, source: 'in_memory' });
 });
 
@@ -187,16 +310,51 @@ apiRouter.patch('/posts/:id', async (req: Request, res: Response) => {
         const merged = { ...mapPostRow(existing.rows[0]), ...updates };
         await pool.query(
           `UPDATE video_posts SET
-            admin_review_status = $1, admin_payout_amount = $2, admin_bounty_awarded = $3,
-            admin_disbursed_date = $4, admin_reviewer_desk = $5, rejection_reason = $6,
-            view_count = $7, like_count = $8, comment_count = $9, updated_at = NOW()
-           WHERE id = $10`,
+            admin_review_status = $1,
+            admin_payout_amount = $2,
+            price_award = $3,
+            rpm_rate = $4,
+            admin_bounty_awarded = $5,
+            admin_disbursed_date = $6,
+            admin_reviewer_desk = $7,
+            rejection_reason = $8,
+            location = $9,
+            source_citation = COALESCE($10, source_citation),
+            is_breaking = COALESCE($11, is_breaking),
+            status = COALESCE($12, status),
+            view_count = $13,
+            like_count = $14,
+            comment_count = $15,
+            updated_at = NOW()
+           WHERE id = $16`,
           [
-            merged.adminReviewStatus, merged.adminPayoutAmount, merged.adminBountyAwarded,
-            merged.adminDisbursedDate || null, merged.adminReviewerDesk || null, merged.rejectionReason || null,
-            merged.viewCount, merged.likeCount, merged.commentCount, postId
+            merged.adminReviewStatus || 'verified_approved',
+            merged.adminPayoutAmount ?? (merged.priceAward || 0),
+            merged.priceAward ?? 0,
+            merged.rpmRate ?? 350,
+            merged.adminBountyAwarded ?? 0,
+            merged.adminDisbursedDate || null,
+            merged.adminReviewerDesk || null,
+            merged.rejectionReason || null,
+            JSON.stringify(merged.location || {}),
+            merged.sourceCitation || null,
+            merged.isBreaking ?? false,
+            merged.status || 'published',
+            merged.viewCount ?? 0,
+            merged.likeCount ?? 0,
+            merged.commentCount ?? 0,
+            postId
           ]
         );
+
+        // Keep memPosts in sync
+        const idx = memPosts.findIndex((p) => p.id === postId);
+        if (idx >= 0) {
+          memPosts[idx] = merged;
+        } else {
+          memPosts.unshift(merged);
+        }
+
         return res.json({ success: true, data: merged });
       }
     } catch (err: any) {
@@ -205,11 +363,48 @@ apiRouter.patch('/posts/:id', async (req: Request, res: Response) => {
   }
 
   const idx = memPosts.findIndex((p) => p.id === postId);
-  if (idx === -1) {
-    return res.status(404).json({ success: false, error: 'Post not found' });
+  if (idx !== -1) {
+    memPosts[idx] = { ...memPosts[idx], ...updates };
+    return res.json({ success: true, data: memPosts[idx] });
   }
-  memPosts[idx] = { ...memPosts[idx], ...updates };
-  res.json({ success: true, data: memPosts[idx] });
+
+  // If post was created client-side or during local session, register and return it gracefully
+  const fallbackPost: VideoPost = {
+    id: postId,
+    creatorId: updates.creatorId || 'usr_tn_001',
+    creatorName: updates.creatorName || 'Citizen Reporter',
+    creatorHandle: updates.creatorHandle || 'citizen_reporter',
+    creatorAvatar: updates.creatorAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200',
+    creatorVerified: updates.creatorVerified || false,
+    type: updates.type || 'video',
+    mediaUrl: updates.mediaUrl || '',
+    thumbnailUrl: updates.thumbnailUrl || updates.mediaUrl || '',
+    headline: updates.headline || 'Citizen Dispatch',
+    caption: updates.caption || '',
+    category: updates.category || 'civic',
+    location: updates.location || { placeName: 'Chennai Hub', lat: 13.0827, lng: 80.2707 },
+    sourceCitation: updates.sourceCitation || 'Direct eyewitness report',
+    durationSeconds: updates.durationSeconds || 15,
+    status: updates.status || 'published',
+    viewCount: updates.viewCount || 0,
+    qualifiedViewCount: updates.qualifiedViewCount || 0,
+    likeCount: updates.likeCount || 0,
+    commentCount: updates.commentCount || 0,
+    shareCount: updates.shareCount || 0,
+    isBreaking: updates.isBreaking || false,
+    adminReviewStatus: updates.adminReviewStatus || 'verified_approved',
+    adminPayoutAmount: updates.adminPayoutAmount || updates.priceAward || 0,
+    priceAward: updates.priceAward || 0,
+    rpmRate: updates.rpmRate || 350,
+    adminBountyAwarded: updates.adminBountyAwarded || 0,
+    adminDisbursedDate: updates.adminDisbursedDate || new Date().toISOString(),
+    adminReviewerDesk: updates.adminReviewerDesk || 'Chennai Bureau Desk',
+    rejectionReason: updates.rejectionReason,
+    createdAt: updates.createdAt || new Date().toISOString()
+  };
+
+  memPosts.unshift(fallbackPost);
+  return res.json({ success: true, data: fallbackPost });
 });
 
 // --- USER ROUTES ---

@@ -5,6 +5,11 @@ CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(64) PRIMARY KEY,
   handle VARCHAR(64) UNIQUE NOT NULL,
   display_name VARCHAR(128) NOT NULL,
+  email VARCHAR(255) UNIQUE,
+  password_hash TEXT,
+  role VARCHAR(32) DEFAULT 'user', -- 'user' | 'creator' | 'admin'
+  google_id VARCHAR(128) UNIQUE,
+  auth_provider VARCHAR(32) DEFAULT 'local', -- 'local' | 'google'
   avatar TEXT,
   bio TEXT,
   home_location JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -100,3 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_posts_status ON video_posts(status);
 CREATE INDEX IF NOT EXISTS idx_posts_created_at ON video_posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_wallet_id ON transactions(wallet_id);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
