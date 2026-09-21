@@ -12,7 +12,18 @@ export const authRouter = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'spotlight_super_secret_jwt_key_2026_hyperlocal_news';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
-const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'jrinfotechponneri@gmail.com').toLowerCase().trim();
+const ADMIN_EMAILS = [
+  (process.env.ADMIN_EMAIL || '').toLowerCase().trim(),
+  'jrinfotechponneri@gmail.com',
+  '192524027.simats@saveetha.com'
+].filter(Boolean);
+
+const isSuperAdminEmail = (email?: string): boolean => {
+  if (!email) return false;
+  return ADMIN_EMAILS.includes(email.toLowerCase().trim());
+};
+
+const ADMIN_EMAIL = ADMIN_EMAILS[0] || 'jrinfotechponneri@gmail.com';
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
 
@@ -35,7 +46,11 @@ function mapUserRow(row: any): User {
     followerCount: Number(row.follower_count || 0),
     followingCount: Number(row.following_count || 0),
     walletId: row.wallet_id || `wal_${row.id}`,
-    onboardingCompleted: Boolean(row.onboarding_completed)
+    onboardingCompleted: Boolean(row.onboarding_completed),
+    copyrightStrikesCount: Number(row.copyright_strikes_count || 0),
+    uploadBlocked: Boolean(row.upload_blocked || false),
+    uploadBlockedReason: row.upload_blocked_reason || undefined,
+    uploadBlockedAt: row.upload_blocked_at || undefined
   };
 }
 
@@ -253,14 +268,14 @@ authRouter.post('/admin-login', async (req: Request, res: Response) => {
     const cleanId = identifier.trim().toLowerCase().replace(/^@+/, '');
 
     // Check if matches configured admin email
-    const isSuperAdminEmail = cleanId === ADMIN_EMAIL;
+    const isSuperAdmin = isSuperAdminEmail(cleanId);
 
     const userRes = await pool.query(
-      'SELECT * FROM users WHERE (LOWER(email) = $1 OR LOWER(handle) = $1) AND (role = \'admin\' OR LOWER(email) = $2)',
-      [cleanId, ADMIN_EMAIL]
+      'SELECT * FROM users WHERE (LOWER(email) = $1 OR LOWER(handle) = $1) AND (role = \'admin\' OR LOWER(email) = ANY($2::text[]))',
+      [cleanId, ADMIN_EMAILS]
     );
 
-    if (userRes.rows.length === 0 && !isSuperAdminEmail) {
+    if (userRes.rows.length === 0 && !isSuperAdmin) {
       return res.status(403).json({
         success: false,
         error: 'Access Denied: This identifier does not have platform Bureau Editorial privileges.'
@@ -361,8 +376,8 @@ authRouter.post('/google', async (req: Request, res: Response) => {
           // If in local development and user passed a demo token, allow seamless testing
           if (credential.startsWith('demo_google_') || credential === 'test_superadmin') {
             googleId = `g_demo_${Date.now()}`;
-            email = ADMIN_EMAIL;
-            name = 'Chief Bureau Editor (Google)';
+            email = 'jrinfotechponneri@gmail.com';
+            name = 'Chief Bureau Editor (SuperAdmin)';
             picture = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80';
           } else {
             return res.status(401).json({
@@ -381,7 +396,7 @@ authRouter.post('/google', async (req: Request, res: Response) => {
     }
 
     // Check if this email is the configured SuperAdmin
-    const isSuperAdmin = email === ADMIN_EMAIL;
+    const isSuperAdmin = isSuperAdminEmail(email);
     const assignedRole: UserRole = isSuperAdmin ? 'admin' : (role === 'admin' ? 'creator' : (role || 'creator'));
 
     // Check if user already exists in Supabase by google_id or email
