@@ -103,7 +103,7 @@ export interface VideoPost {
   location: LocationCoordinates;
   sourceCitation: string | null;
   durationSeconds: number;
-  status: 'draft' | 'in_review' | 'published' | 'removed' | 'copyright_takedown';
+  status: 'draft' | 'in_review' | 'published' | 'removed' | 'rejected' | 'copyright_takedown' | 'scheduled';
   createdAt: string;
   viewCount: number;
   qualifiedViewCount: number;

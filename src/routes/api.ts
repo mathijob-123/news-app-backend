@@ -481,11 +481,16 @@ apiRouter.get('/posts', async (req: Request, res: Response) => {
     try {
       let query = 'SELECT * FROM video_posts';
       const params: any[] = [];
-      if (!includeScheduled && !status) {
-        query += " WHERE (status = 'published' OR status IS NULL)";
-      } else if (status) {
-        params.push(status);
-        query += ` WHERE status = $1`;
+      if (status && status !== 'all') {
+        if (status === 'pending' || status === 'in_review') {
+          query += " WHERE (status = 'in_review' OR admin_review_status = 'pending_review')";
+        } else {
+          params.push(status);
+          query += ` WHERE status = $1`;
+        }
+      } else if (!includeScheduled && status !== 'all') {
+        // Return published, in_review, and rejected posts so editorial desk & user profile can inspect them (exclude scheduled)
+        query += " WHERE (status IN ('published', 'in_review', 'rejected') OR status IS NULL)";
       }
       query += ' ORDER BY created_at DESC';
       const result = await pool.query(query, params);
@@ -496,10 +501,14 @@ apiRouter.get('/posts', async (req: Request, res: Response) => {
     }
   }
   let filtered = [...memPosts];
-  if (!includeScheduled && !status) {
-    filtered = filtered.filter((p) => p.status === 'published' || !p.status);
-  } else if (status) {
-    filtered = filtered.filter((p) => p.status === status);
+  if (status && status !== 'all') {
+    if (status === 'pending' || status === 'in_review') {
+      filtered = filtered.filter((p) => p.status === 'in_review' || p.adminReviewStatus === 'pending_review');
+    } else {
+      filtered = filtered.filter((p) => p.status === status);
+    }
+  } else if (!includeScheduled && status !== 'all') {
+    filtered = filtered.filter((p) => p.status !== 'copyright_takedown' && p.status !== 'scheduled');
   }
   res.json({ success: true, count: filtered.length, data: filtered, source: 'in_memory' });
 });
