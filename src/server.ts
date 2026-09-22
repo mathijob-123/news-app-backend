@@ -5,6 +5,7 @@ import { apiRouter } from './routes/api.js';
 import { authRouter } from './routes/auth.js';
 import { testDbConnection } from './config/db.js';
 import { runAuthMigration } from './db/authMigration.js';
+import { runBlobRepair } from './db/blobRepair.js';
 
 dotenv.config();
 
@@ -66,6 +67,7 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
     const connected = await testDbConnection();
     if (connected) {
       await runAuthMigration();
+      await runBlobRepair();
     }
   });
 }

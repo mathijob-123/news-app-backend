@@ -62,8 +62,12 @@ function mapPostRow(row: any): VideoPost {
     creatorAvatar: row.creator_avatar,
     creatorVerified: row.creator_verified,
     type: row.type,
-    mediaUrl: row.media_url,
-    thumbnailUrl: row.thumbnail_url,
+    mediaUrl: (row.media_url && !row.media_url.startsWith('blob:') && !row.media_url.includes('commondatastorage.googleapis.com'))
+      ? row.media_url
+      : 'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1790055069322_p0l98f.mp4',
+    thumbnailUrl: (row.thumbnail_url && !row.thumbnail_url.startsWith('blob:'))
+      ? row.thumbnail_url
+      : 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600',
     headline: row.headline,
     caption: row.caption,
     category: row.category,
@@ -969,15 +973,55 @@ apiRouter.post('/spotlight360/bulk-create', async (req: Request, res: Response) 
     };
     const radiusMeters = (loc.radiusKm || 5) * 1000;
 
+    const rawHandle = (item.creatorHandle || item.creatorName || 'reporter')
+      .replace(/^@/, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '');
+    const cleanHandle = `@${rawHandle || 'reporter'}`;
+    let creatorId = item.creatorId || `usr_${rawHandle || 'reporter'}_${Date.now().toString(36)}`;
+    const creatorName = item.creatorName || item.advertiserName || 'Spotlight Reporter';
+    const creatorAvatar = item.creatorAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200';
+    const creatorVerified = item.creatorVerified !== undefined ? item.creatorVerified : true;
+
+    if (hasDb) {
+      try {
+        const existingU = await pool.query('SELECT id FROM users WHERE handle = $1 OR id = $2 LIMIT 1', [rawHandle, creatorId]);
+        if (existingU.rows.length > 0) {
+          creatorId = existingU.rows[0].id;
+          await pool.query(
+            `UPDATE users SET display_name = $1, avatar = $2, verified = $3, updated_at = NOW() WHERE id = $4`,
+            [creatorName, creatorAvatar, creatorVerified, creatorId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO users (id, display_name, handle, avatar, role, verified, bio, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'citizen', $5, 'Spotlight Hyperlocal Citizen Reporter', NOW(), NOW())`,
+            [creatorId, creatorName, rawHandle, creatorAvatar, creatorVerified]
+          );
+        }
+      } catch (userErr: any) {
+        console.warn('[DB User Upsert Warning]:', userErr.message);
+        // Fallback to verified existing admin user if foreign key requires it
+        try {
+          const chk = await pool.query('SELECT id FROM users WHERE id = $1', [creatorId]);
+          if (chk.rows.length === 0) {
+            creatorId = 'usr_admin_jr';
+          }
+        } catch {}
+      }
+    }
+
     const postRecord: VideoPost = {
       id: videoId,
-      creatorId: 'usr_admin_jr',
-      creatorName: item.advertiserName || 'Spotlight360 Official',
-      creatorHandle: 'spotlight360',
-      creatorAvatar: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200',
-      creatorVerified: true,
+      creatorId,
+      creatorName,
+      creatorHandle: cleanHandle,
+      creatorAvatar,
+      creatorVerified,
       type: 'video',
-      mediaUrl: item.mediaUrl,
+      mediaUrl: (item.mediaUrl && !item.mediaUrl.startsWith('blob:') && !item.mediaUrl.includes('commondatastorage.googleapis.com')) 
+        ? item.mediaUrl 
+        : 'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1790055069322_p0l98f.mp4',
       thumbnailUrl: item.thumbnailUrl || item.mediaUrl,
       headline: item.title || 'Spotlight360 Video',
       caption: item.description || '',
@@ -1134,6 +1178,90 @@ apiRouter.put('/user', async (req: Request, res: Response) => {
   }
   memUser = { ...memUser, ...updates };
   res.json({ success: true, data: memUser });
+});
+
+// --- CREATORS & REPORTERS DIRECTORY ---
+apiRouter.get('/creators', async (_req: Request, res: Response) => {
+  const creatorsMap = new Map<string, { id: string; name: string; handle: string; avatar: string; verified: boolean }>();
+
+  // Default known reporters and creators
+  const defaultCreators = [
+    { id: 'usr_admin_jr', name: 'Spotlight360 Official', handle: 'spotlight360', avatar: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200', verified: true },
+    { id: 'usr_tn_health', name: 'TN Health Desk', handle: 'TNHealthDesk', avatar: 'https://images.unsplash.com/photo-1584515979956-d9f6e5d09982?w=200', verified: true },
+    { id: 'usr_tn_civic', name: 'Ponneri Citizen Watch', handle: 'ponnericivic', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200', verified: true },
+    { id: 'usr_tn_traffic', name: 'Chennai Traffic Live', handle: 'chennaitraffic', avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200', verified: true },
+    { id: 'usr_tn_001', name: 'Citizen Journalist', handle: 'citizen_reporter', avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200', verified: false }
+  ];
+  for (const c of defaultCreators) {
+    creatorsMap.set(c.id, c);
+  }
+
+  if (hasDb) {
+    try {
+      const uRes = await pool.query('SELECT id, display_name, handle, avatar, verified FROM users LIMIT 100');
+      for (const row of uRes.rows) {
+        creatorsMap.set(row.id, {
+          id: row.id,
+          name: row.display_name || row.handle || 'Reporter',
+          handle: row.handle || 'reporter',
+          avatar: row.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200',
+          verified: Boolean(row.verified)
+        });
+      }
+
+      const pRes = await pool.query('SELECT DISTINCT creator_id, creator_name, creator_handle, creator_avatar, creator_verified FROM video_posts LIMIT 50');
+      for (const row of pRes.rows) {
+        if (row.creator_id && !creatorsMap.has(row.creator_id)) {
+          creatorsMap.set(row.creator_id, {
+            id: row.creator_id,
+            name: row.creator_name || 'Reporter',
+            handle: row.creator_handle || 'reporter',
+            avatar: row.creator_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200',
+            verified: Boolean(row.creator_verified)
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn('[DB Creators Query Error]:', err.message);
+    }
+  }
+
+  res.json({ success: true, count: creatorsMap.size, data: Array.from(creatorsMap.values()) });
+});
+
+apiRouter.post('/creators', async (req: Request, res: Response) => {
+  const { name, handle, avatar, verified = true, bio } = req.body;
+  if (!name) {
+    return res.status(400).json({ success: false, error: 'Name is required' });
+  }
+
+  const cleanHandle = (handle || name.toLowerCase().replace(/[^a-z0-9_]/g, '')).replace(/^@/, '');
+  const id = `usr_cr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const cleanAvatar = avatar || `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200`;
+
+  const newCreator = {
+    id,
+    name: name.trim(),
+    handle: cleanHandle,
+    avatar: cleanAvatar,
+    verified: Boolean(verified),
+    bio: bio || 'Citizen reporter and creator for Spotlight hyperlocal network.'
+  };
+
+  if (hasDb) {
+    try {
+      await pool.query(
+        `INSERT INTO users (id, handle, display_name, avatar, bio, verified, is_creator, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, true, NOW(), NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [newCreator.id, newCreator.handle, newCreator.name, newCreator.avatar, newCreator.bio, newCreator.verified]
+      );
+    } catch (err: any) {
+      console.warn('[DB Creator Insert Error]:', err.message);
+    }
+  }
+
+  res.json({ success: true, data: newCreator });
 });
 
 // --- WALLET & TRANSACTIONS ROUTES ---

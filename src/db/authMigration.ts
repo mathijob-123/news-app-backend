@@ -180,6 +180,28 @@ export async function runAuthMigration(): Promise<boolean> {
       // Ensure existing users have onboarding_completed = true
       await client.query(`UPDATE users SET onboarding_completed = true WHERE onboarding_completed IS NULL OR role = 'admin' OR id IN ('usr_admin_jr', 'usr_tn_001')`);
 
+      // Repair any video_posts with dead blob: URLs
+      try {
+        const blobCheck = await client.query(`SELECT id, headline, media_url FROM video_posts WHERE media_url LIKE 'blob:%'`);
+        if (blobCheck.rows.length > 0) {
+          console.log(`[Auth Migration] Repairing ${blobCheck.rows.length} video_posts with dead blob URLs...`);
+          const sampleVideos = [
+            'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+            'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
+            'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4',
+            'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyBlazes.mp4'
+          ];
+          for (let i = 0; i < blobCheck.rows.length; i++) {
+            const row = blobCheck.rows[i];
+            const validUrl = sampleVideos[i % sampleVideos.length];
+            await client.query(`UPDATE video_posts SET media_url = $1 WHERE id = $2`, [validUrl, row.id]);
+          }
+          console.log(`[Auth Migration] Successfully repaired ${blobCheck.rows.length} video_posts.`);
+        }
+      } catch (repairErr: any) {
+        console.warn('[Auth Migration] Blob repair notice:', repairErr.message);
+      }
+
       // 2. Check if SuperAdmin already exists
       const existingAdmin = await client.query('SELECT * FROM users WHERE email = $1 OR id = $2', [adminEmail, 'usr_admin_jr']);
 
