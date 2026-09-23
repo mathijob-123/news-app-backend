@@ -373,8 +373,9 @@ authRouter.post('/google', async (req: Request, res: Response) => {
           name = info.name || 'Google User';
           picture = info.picture || '';
         } else {
-          // If in local development and user passed a demo token, allow seamless testing
-          if (credential.startsWith('demo_google_') || credential === 'test_superadmin') {
+          // Only allow mock demo tokens if explicitly enabled in local non-production environment
+          const isDevBypassEnabled = process.env.NODE_ENV !== 'production' && process.env.ENABLE_DEV_AUTH_BYPASS === 'true';
+          if (isDevBypassEnabled && (credential.startsWith('demo_google_') || credential === 'test_superadmin')) {
             googleId = `g_demo_${Date.now()}`;
             email = 'jrinfotechponneri@gmail.com';
             name = 'Chief Bureau Editor (SuperAdmin)';
@@ -382,7 +383,7 @@ authRouter.post('/google', async (req: Request, res: Response) => {
           } else {
             return res.status(401).json({
               success: false,
-              error: `Google token verification failed: ${verifyErr.message}. Make sure http://localhost:5173 is authorized in Google Cloud Console.`
+              error: `Google token verification failed: ${verifyErr.message}. Make sure your origin is authorized in Google Cloud Console.`
             });
           }
         }
