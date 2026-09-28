@@ -741,11 +741,13 @@ apiRouter.delete('/posts/:id', async (req: Request, res: Response) => {
   const postId = req.params.id as string;
 
   memPosts = memPosts.filter((p) => p.id !== postId);
+  memSpotlight360Videos = memSpotlight360Videos.filter((v) => v.id !== postId);
   delete memComments[postId];
 
   if (hasDb) {
     try {
       await pool.query('DELETE FROM comments WHERE post_id = $1', [postId]);
+      await pool.query('DELETE FROM copyright_reports WHERE post_id = $1', [postId]);
       await pool.query('DELETE FROM video_posts WHERE id = $1', [postId]);
       return res.json({
         success: true,
@@ -781,11 +783,13 @@ apiRouter.post('/posts/bulk-update', async (req: Request, res: Response) => {
 
   if (action === 'delete') {
     memPosts = memPosts.filter((p) => !postIds.includes(p.id));
+    memSpotlight360Videos = memSpotlight360Videos.filter((v) => !postIds.includes(v.id));
     postIds.forEach((id) => delete memComments[id]);
 
     if (hasDb) {
       try {
         await pool.query('DELETE FROM comments WHERE post_id = ANY($1)', [postIds]);
+        await pool.query('DELETE FROM copyright_reports WHERE post_id = ANY($1)', [postIds]);
         await pool.query('DELETE FROM video_posts WHERE id = ANY($1)', [postIds]);
         return res.json({
           success: true,
@@ -1132,6 +1136,70 @@ apiRouter.get('/spotlight360', async (_req: Request, res: Response) => {
     success: true,
     data: memSpotlight360Videos,
     count: memSpotlight360Videos.length
+  });
+});
+
+// Delete a single Spotlight360 video and its associated post & reels record
+apiRouter.delete('/spotlight360/:id', async (req: Request, res: Response) => {
+  const videoId = req.params.id as string;
+  memSpotlight360Videos = memSpotlight360Videos.filter((v) => v.id !== videoId);
+  memPosts = memPosts.filter((p) => p.id !== videoId);
+  delete memComments[videoId];
+
+  if (hasDb) {
+    try {
+      await pool.query('DELETE FROM comments WHERE post_id = $1', [videoId]);
+      await pool.query('DELETE FROM copyright_reports WHERE post_id = $1', [videoId]);
+      await pool.query('DELETE FROM video_posts WHERE id = $1', [videoId]);
+      return res.json({
+        success: true,
+        message: 'Spotlight360 video deleted successfully from database and reels',
+        source: 'supabase_postgres'
+      });
+    } catch (err: any) {
+      console.warn('[DB Spotlight360 Delete Error]:', err.message);
+    }
+  }
+
+  res.json({
+    success: true,
+    message: 'Spotlight360 video deleted successfully from in-memory store',
+    source: 'in_memory'
+  });
+});
+
+// Bulk delete Spotlight360 videos
+apiRouter.post('/spotlight360/bulk-delete', async (req: Request, res: Response) => {
+  const { videoIds } = req.body;
+  if (!Array.isArray(videoIds) || videoIds.length === 0) {
+    return res.status(400).json({ success: false, error: 'videoIds must be a non-empty array' });
+  }
+
+  memSpotlight360Videos = memSpotlight360Videos.filter((v) => !videoIds.includes(v.id));
+  memPosts = memPosts.filter((p) => !videoIds.includes(p.id));
+  videoIds.forEach((id) => delete memComments[id]);
+
+  if (hasDb) {
+    try {
+      await pool.query('DELETE FROM comments WHERE post_id = ANY($1)', [videoIds]);
+      await pool.query('DELETE FROM copyright_reports WHERE post_id = ANY($1)', [videoIds]);
+      await pool.query('DELETE FROM video_posts WHERE id = ANY($1)', [videoIds]);
+      return res.json({
+        success: true,
+        count: videoIds.length,
+        message: `${videoIds.length} Spotlight360 videos deleted successfully`,
+        source: 'supabase_postgres'
+      });
+    } catch (err: any) {
+      console.warn('[DB Spotlight360 Bulk Delete Error]:', err.message);
+    }
+  }
+
+  res.json({
+    success: true,
+    count: videoIds.length,
+    message: `${videoIds.length} Spotlight360 videos deleted from in-memory store`,
+    source: 'in_memory'
   });
 });
 
