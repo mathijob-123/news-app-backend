@@ -3,8 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { apiRouter } from './routes/api.js';
 import { authRouter } from './routes/auth.js';
+import { marketplaceRouter } from './routes/marketplace.js';
 import { testDbConnection } from './config/db.js';
 import { runAuthMigration } from './db/authMigration.js';
+import { runMarketplaceMigration } from './db/marketplaceMigration.js';
 import { runBlobRepair } from './db/blobRepair.js';
 
 dotenv.config();
@@ -42,6 +44,9 @@ app.use(express.urlencoded({ limit: '100mb', extended: true }));
 // Mount Auth routes under /api/auth
 app.use('/api/auth', authRouter);
 
+// Mount Marketplace routes under /api/marketplace
+app.use('/api/marketplace', marketplaceRouter);
+
 // Mount core API routes under /api
 app.use('/api', apiRouter);
 
@@ -54,6 +59,9 @@ app.get('/', (_req, res) => {
     endpoints: {
       health: '/api/health',
       posts: '/api/posts',
+      marketplace: '/api/marketplace/products',
+      properties: '/api/marketplace/properties',
+      jobs: '/api/marketplace/jobs',
       user: '/api/user',
       wallet: '/api/wallet',
       comments: '/api/comments/:postId',
@@ -68,6 +76,7 @@ if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
     const connected = await testDbConnection();
     if (connected) {
       await runAuthMigration();
+      await runMarketplaceMigration();
       await runBlobRepair();
     }
   });
