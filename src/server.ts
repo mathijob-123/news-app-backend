@@ -41,6 +41,32 @@ app.use(cors({
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
+// Ensure DB schema migrations run on Vercel serverless cold starts
+let dbInitPromise: Promise<void> | null = null;
+async function ensureDbInitialized() {
+  if (!dbInitPromise) {
+    dbInitPromise = (async () => {
+      try {
+        const connected = await testDbConnection();
+        if (connected) {
+          await runAuthMigration();
+          await runMarketplaceMigration();
+        }
+      } catch (err: any) {
+        console.warn('[Vercel DB Init Warning]:', err.message);
+      }
+    })();
+  }
+  return dbInitPromise;
+}
+
+app.use(async (_req, _res, next) => {
+  if (process.env.VERCEL) {
+    await ensureDbInitialized();
+  }
+  next();
+});
+
 // Mount Auth routes under /api/auth
 app.use('/api/auth', authRouter);
 

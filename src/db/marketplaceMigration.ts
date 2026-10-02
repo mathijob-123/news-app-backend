@@ -124,6 +124,81 @@ export async function runMarketplaceMigration(): Promise<boolean> {
         CREATE INDEX IF NOT EXISTS idx_chats_product ON marketplace_chats(product_id);
       `);
 
+      // 5. Centralized Marketplace Reports & Complaints Table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS marketplace_reports (
+          id VARCHAR(64) PRIMARY KEY,
+          item_type VARCHAR(32) NOT NULL, -- 'product' | 'job' | 'property' | 'user'
+          item_id VARCHAR(64) NOT NULL,
+          reported_user_id VARCHAR(64),
+          reporter_id VARCHAR(64),
+          reporter_name VARCHAR(128) NOT NULL,
+          reporter_contact VARCHAR(128),
+          reason VARCHAR(255) NOT NULL,
+          description TEXT,
+          status VARCHAR(32) DEFAULT 'new', -- 'new' | 'under_review' | 'resolved' | 'rejected' | 'escalated'
+          assigned_moderator VARCHAR(128),
+          admin_notes TEXT,
+          resolution TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mp_reports_status ON marketplace_reports(status);
+        CREATE INDEX IF NOT EXISTS idx_mp_reports_type ON marketplace_reports(item_type);
+        CREATE INDEX IF NOT EXISTS idx_mp_reports_item ON marketplace_reports(item_id);
+      `);
+
+      // 6. Ensure schema column extensions for existing tables
+      await client.query(`
+        -- Alter marketplace_products
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS subcategory VARCHAR(64);
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS district VARCHAR(128);
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS taluk VARCHAR(128);
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS area VARCHAR(128);
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS saves_count INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS enquiries_count INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS whatsapp_clicks INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS contact_clicks INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS reports_count INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+        ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+
+        -- Alter real_estate_properties
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS district VARCHAR(128);
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS taluk VARCHAR(128);
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS area VARCHAR(128);
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS super_built_up_area NUMERIC(10, 2) DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS plot_area NUMERIC(10, 2) DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS saves_count INTEGER DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS enquiries_count INTEGER DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS whatsapp_clicks INTEGER DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS contact_clicks INTEGER DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS views_count INTEGER DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS reports_count INTEGER DEFAULT 0;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+        ALTER TABLE real_estate_properties ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+
+        -- Alter marketplace_jobs
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS district VARCHAR(128);
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS area VARCHAR(128);
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS recruiter_name VARCHAR(128);
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS recruiter_whatsapp VARCHAR(32);
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS min_salary NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS max_salary NUMERIC(12, 2) DEFAULT 0;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS education VARCHAR(128);
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS benefits JSONB DEFAULT '[]'::jsonb;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS openings_count INTEGER DEFAULT 1;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS expiry_date VARCHAR(64);
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS views_count INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS saves_count INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS reports_count INTEGER DEFAULT 0;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+        ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+      `);
+
       // Check and Seed Initial Products
       const prodCheck = await client.query('SELECT COUNT(*) FROM marketplace_products');
       if (parseInt(prodCheck.rows[0].count, 10) === 0) {
@@ -137,10 +212,10 @@ export async function runMarketplaceMigration(): Promise<boolean> {
             category: 'mobiles',
             condition: 'Like New',
             description: 'iPhone 15 256GB, original box with charger. Excellent condition, no scratches. Bill available. Battery health 98%.',
-            location: 'Andheri West, Mumbai',
+            location: 'Anna Nagar, Chennai',
             distanceKm: 1.2,
             postedAt: '2 days ago',
-            viewsCount: 13,
+            viewsCount: 48,
             images: JSON.stringify([
               'https://images.unsplash.com/photo-1695048133142-1a20484d2569?auto=format&fit=crop&w=800&q=80',
               'https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?auto=format&fit=crop&w=800&q=80'
@@ -166,7 +241,7 @@ export async function runMarketplaceMigration(): Promise<boolean> {
             category: 'mobiles',
             condition: 'Like New',
             description: 'Samsung Galaxy S23 128GB Phantom Black. Under brand warranty. With official silicon cover and original adapter.',
-            location: 'Bandra, Mumbai',
+            location: 'T. Nagar, Chennai',
             distanceKm: 2.5,
             postedAt: '3 days ago',
             viewsCount: 28,
@@ -194,7 +269,7 @@ export async function runMarketplaceMigration(): Promise<boolean> {
             category: 'electronics',
             condition: 'Like New',
             description: 'Midnight Blue MacBook Air M2 in pristine shape. Battery health 96%. Includes box, MagSafe cable, and 35W dual charger.',
-            location: 'Powai, Mumbai',
+            location: 'Velachery, Chennai',
             distanceKm: 4.1,
             postedAt: '1 day ago',
             viewsCount: 42,
@@ -218,8 +293,8 @@ export async function runMarketplaceMigration(): Promise<boolean> {
 
         for (const p of initialProducts) {
           await client.query(
-            `INSERT INTO marketplace_products (id, title, price, price_negotiable, category, condition, description, location, distance_km, posted_at, views_count, images, specs, seller, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            `INSERT INTO marketplace_products (id, title, price, price_negotiable, category, condition, description, location, distance_km, posted_at, views_count, images, specs, seller, status, is_verified)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, true)
              ON CONFLICT (id) DO NOTHING`,
             [p.id, p.title, p.price, p.priceNegotiable, p.category, p.condition, p.description, p.location, p.distanceKm, p.postedAt, p.viewsCount, p.images, p.specs, p.seller, p.status]
           );
@@ -278,15 +353,113 @@ export async function runMarketplaceMigration(): Promise<boolean> {
 
         for (const pr of initialProperties) {
           await client.query(
-            `INSERT INTO real_estate_properties (id, title, price, numeric_price, price_unit, listing_type, property_category, property_type, location, bedrooms, bathrooms, area_sq_ft, images, description, specifications, owner, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            `INSERT INTO real_estate_properties (id, title, price, numeric_price, price_unit, listing_type, property_category, property_type, location, bedrooms, bathrooms, area_sq_ft, images, description, specifications, owner, status, is_verified)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, true)
              ON CONFLICT (id) DO NOTHING`,
             [pr.id, pr.title, pr.price, pr.numericPrice, pr.priceUnit, pr.listingType, pr.propertyCategory, pr.propertyType, pr.location, pr.bedrooms, pr.bathrooms, pr.areaSqFt, pr.images, pr.description, pr.specifications, pr.owner, pr.status]
           );
         }
       }
 
-      console.log('[Marketplace Migration] Supabase tables ensured for marketplace_products, real_estate_properties, marketplace_jobs, marketplace_chats!');
+      // Check and Seed Initial Jobs
+      const jobCheck = await client.query('SELECT COUNT(*) FROM marketplace_jobs');
+      if (parseInt(jobCheck.rows[0].count, 10) === 0) {
+        console.log('[Marketplace Migration] Seeding initial Jobs into Supabase...');
+        const initialJobs = [
+          {
+            id: 'job-frontend-dev',
+            title: 'Senior Frontend Developer (React)',
+            company: 'Nexus Infotech Solutions',
+            location: 'Tidel Park, Tharamani, Chennai',
+            salary: '₹12 - 18 LPA',
+            job_type: 'Full Time',
+            experience: '4-7 Years',
+            category: 'IT & Software',
+            description: 'Looking for an experienced React/TypeScript specialist to build high-scale web products with modern UI/UX workflows.',
+            requirements: JSON.stringify(['4+ years React/TypeScript', 'Tailwind or Modern CSS', 'REST API integrations', 'State Management']),
+            skills: JSON.stringify(['React', 'TypeScript', 'Node.js', 'Redux', 'REST APIs']),
+            contact_email: 'careers@nexusinfo.com',
+            contact_phone: '+91 98405 67890',
+            applicant_count: 14,
+            status: 'active',
+            is_verified: true
+          },
+          {
+            id: 'job-sales-exec',
+            title: 'Area Business Development Manager',
+            company: 'Kavitha Motors & Logistics',
+            location: 'Ambattur Industrial Estate, Chennai',
+            salary: '₹35,000 - 50,000/mo',
+            job_type: 'Full Time',
+            experience: '2-5 Years',
+            category: 'Sales',
+            description: 'Responsible for B2B client acquisition, dealership relationships, and territory expansion across North Chennai.',
+            requirements: JSON.stringify(['2+ years field sales', 'Excellent Tamil & English communication', 'Two wheeler required']),
+            skills: JSON.stringify(['B2B Sales', 'Negotiation', 'Field Marketing', 'CRM']),
+            contact_email: 'hr@kavithamotors.com',
+            contact_phone: '+91 94441 23456',
+            applicant_count: 8,
+            status: 'active',
+            is_verified: true
+          }
+        ];
+
+        for (const j of initialJobs) {
+          await client.query(
+            `INSERT INTO marketplace_jobs (id, title, company, location, salary, job_type, experience, category, description, requirements, skills, contact_email, contact_phone, applicant_count, status, is_verified)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             ON CONFLICT (id) DO NOTHING`,
+            [j.id, j.title, j.company, j.location, j.salary, j.job_type, j.experience, j.category, j.description, j.requirements, j.skills, j.contact_email, j.contact_phone, j.applicant_count, j.status, j.is_verified]
+          );
+        }
+      }
+
+      // Check and Seed Initial Reports
+      const reportCheck = await client.query('SELECT COUNT(*) FROM marketplace_reports');
+      if (parseInt(reportCheck.rows[0].count, 10) === 0) {
+        console.log('[Marketplace Migration] Seeding initial Marketplace reports into Supabase...');
+        const initialReports = [
+          {
+            id: 'rep-mp-101',
+            item_type: 'product',
+            item_id: 'prod-iphone15',
+            reported_user_id: 'seller-rohit',
+            reporter_id: 'usr_buyer_44',
+            reporter_name: 'Vignesh K.',
+            reporter_contact: '+91 97910 88231',
+            reason: 'Suspected incorrect battery health claim',
+            description: 'Seller claims 98% battery health but diagnostics screenshot is not attached in the listing description.',
+            status: 'under_review',
+            assigned_moderator: 'Moderator Desk',
+            admin_notes: 'Checking IMEI and receipt verification with seller.'
+          },
+          {
+            id: 'rep-mp-102',
+            item_type: 'job',
+            item_id: 'job-sales-exec',
+            reported_user_id: 'usr_recruiter_9',
+            reporter_id: 'usr_jobseeker_12',
+            reporter_name: 'Anand Mohan',
+            reporter_contact: 'anand.m@gmail.com',
+            reason: 'Unclear working hours / incentive terms',
+            description: 'Job description lists monthly salary but does not disclose travel allowance conditions for field sales.',
+            status: 'new',
+            assigned_moderator: 'Unassigned',
+            admin_notes: 'Under initial review queue.'
+          }
+        ];
+
+        for (const rep of initialReports) {
+          await client.query(
+            `INSERT INTO marketplace_reports (id, item_type, item_id, reported_user_id, reporter_id, reporter_name, reporter_contact, reason, description, status, assigned_moderator, admin_notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             ON CONFLICT (id) DO NOTHING`,
+            [rep.id, rep.item_type, rep.item_id, rep.reported_user_id, rep.reporter_id, rep.reporter_name, rep.reporter_contact, rep.reason, rep.description, rep.status, rep.assigned_moderator, rep.admin_notes]
+          );
+        }
+      }
+
+      console.log('[Marketplace Migration] Supabase tables ensured for marketplace_products, real_estate_properties, marketplace_jobs, marketplace_chats & marketplace_reports!');
       return true;
     } finally {
       client.release();
@@ -296,3 +469,4 @@ export async function runMarketplaceMigration(): Promise<boolean> {
     return false;
   }
 }
+
