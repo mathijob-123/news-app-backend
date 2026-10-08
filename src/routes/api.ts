@@ -52,8 +52,41 @@ let memNotifications: AppNotification[] = [...INITIAL_NOTIFICATIONS];
 // Helper to check if DB is configured
 const hasDb = Boolean(process.env.DATABASE_URL);
 
+// Detect cryptic filename hashes like Instagram CDN IDs (e.g. AQPI2ClckX...) or random alphanumeric strings
+function isCrypticHash(text?: string | null): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/^AQ[A-Za-z0-9_-]{8,}/i.test(trimmed)) return true;
+  const tokens = trimmed.split(/[\s_-]+/);
+  for (const t of tokens) {
+    if (t.length >= 16 && /[0-9]/.test(t) && /[a-z]/i.test(t)) return true;
+    if (t.length >= 22) return true;
+  }
+  if (/^[A-Za-z0-9]{20,}$/.test(trimmed)) return true;
+  return false;
+}
+
+function getCleanHeadline(headline?: string | null, caption?: string | null, fallbackLocation?: string): string {
+  if (headline && !isCrypticHash(headline)) return headline.trim();
+  if (caption && !isCrypticHash(caption)) {
+    const cleanCap = caption.trim();
+    if (cleanCap.length >= 4 && cleanCap.length <= 100) return cleanCap;
+  }
+  return fallbackLocation ? `${fallbackLocation} Spotlight Reel` : 'Local Spotlight Reel';
+}
+
 // Row mappers
 function mapPostRow(row: any): VideoPost {
+  const loc = typeof row.location === 'string' ? JSON.parse(row.location) : row.location;
+  const cleanHeadline = isCrypticHash(row.headline)
+    ? getCleanHeadline(row.headline, row.caption, loc?.neighborhood || loc?.placeName)
+    : row.headline;
+  const cleanSource = (row.source_citation && (
+    row.source_citation.toLowerCase().includes('campaign') ||
+    row.source_citation.toLowerCase().includes('spotlight360')
+  )) ? null : row.source_citation;
+
   return {
     id: row.id,
     creatorId: row.creator_id,
@@ -68,11 +101,11 @@ function mapPostRow(row: any): VideoPost {
     thumbnailUrl: (row.thumbnail_url && !row.thumbnail_url.startsWith('blob:'))
       ? row.thumbnail_url
       : 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600',
-    headline: row.headline,
+    headline: cleanHeadline,
     caption: row.caption,
     category: row.category,
-    location: typeof row.location === 'string' ? JSON.parse(row.location) : row.location,
-    sourceCitation: row.source_citation,
+    location: loc,
+    sourceCitation: cleanSource,
     durationSeconds: Number(row.duration_seconds || 0),
     status: row.status,
     viewCount: Number(row.view_count || 0),
@@ -1027,7 +1060,7 @@ apiRouter.post('/spotlight360/bulk-create', async (req: Request, res: Response) 
         ? item.mediaUrl 
         : 'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1790055069322_p0l98f.mp4',
       thumbnailUrl: item.thumbnailUrl || item.mediaUrl,
-      headline: item.title || 'Spotlight360 Video',
+      headline: getCleanHeadline(item.title, item.description, loc.area),
       caption: item.description || '',
       category: item.category || 'business',
       location: {
@@ -1039,7 +1072,7 @@ apiRouter.post('/spotlight360/bulk-create', async (req: Request, res: Response) 
         pincode: loc.pincode,
         radiusMeters
       },
-      sourceCitation: item.campaignName ? `Spotlight360 Campaign: ${item.campaignName}` : 'Spotlight360 Hyperlocal Hub',
+      sourceCitation: null,
       durationSeconds: item.durationSeconds || 30,
       status: item.status === 'active' ? 'published' : 'draft',
       viewCount: item.views || 0,
