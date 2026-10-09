@@ -201,6 +201,151 @@ marketplaceRouter.patch('/products/:id/status', async (req: Request, res: Respon
   }
 });
 
+// PUT / PATCH update product details
+marketplaceRouter.put('/products/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      price,
+      priceNegotiable,
+      category,
+      condition,
+      description,
+      location,
+      images,
+      videoUrl,
+      specs,
+      seller,
+      status
+    } = req.body;
+
+    const query = `
+      UPDATE marketplace_products
+      SET
+        title = COALESCE($1, title),
+        price = COALESCE($2, price),
+        price_negotiable = COALESCE($3, price_negotiable),
+        category = COALESCE($4, category),
+        condition = COALESCE($5, condition),
+        description = COALESCE($6, description),
+        location = COALESCE($7, location),
+        images = COALESCE($8, images),
+        video_url = COALESCE($9, video_url),
+        specs = COALESCE($10, specs),
+        seller = COALESCE($11, seller),
+        status = COALESCE($12, status),
+        updated_at = NOW()
+      WHERE id = $13
+      RETURNING *
+    `;
+
+    const values = [
+      title || null,
+      price !== undefined ? parseFloat(price) : null,
+      typeof priceNegotiable === 'boolean' ? priceNegotiable : null,
+      category || null,
+      condition || null,
+      description || null,
+      location || null,
+      images ? JSON.stringify(images) : null,
+      videoUrl || null,
+      specs ? JSON.stringify(specs) : null,
+      seller ? JSON.stringify(seller) : null,
+      status || null,
+      id
+    ];
+
+    const result = await pool.query(query, values);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    return res.json({ success: true, product: result.rows[0] });
+  } catch (err: any) {
+    console.error('[Marketplace API Error - PUT /products/:id]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+marketplaceRouter.patch('/products/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      price,
+      priceNegotiable,
+      category,
+      condition,
+      description,
+      location,
+      images,
+      videoUrl,
+      specs,
+      seller,
+      status
+    } = req.body;
+
+    const query = `
+      UPDATE marketplace_products
+      SET
+        title = COALESCE($1, title),
+        price = COALESCE($2, price),
+        price_negotiable = COALESCE($3, price_negotiable),
+        category = COALESCE($4, category),
+        condition = COALESCE($5, condition),
+        description = COALESCE($6, description),
+        location = COALESCE($7, location),
+        images = COALESCE($8, images),
+        video_url = COALESCE($9, video_url),
+        specs = COALESCE($10, specs),
+        seller = COALESCE($11, seller),
+        status = COALESCE($12, status),
+        updated_at = NOW()
+      WHERE id = $13
+      RETURNING *
+    `;
+
+    const values = [
+      title || null,
+      price !== undefined ? parseFloat(price) : null,
+      typeof priceNegotiable === 'boolean' ? priceNegotiable : null,
+      category || null,
+      condition || null,
+      description || null,
+      location || null,
+      images ? JSON.stringify(images) : null,
+      videoUrl || null,
+      specs ? JSON.stringify(specs) : null,
+      seller ? JSON.stringify(seller) : null,
+      status || null,
+      id
+    ];
+
+    const result = await pool.query(query, values);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    return res.json({ success: true, product: result.rows[0] });
+  } catch (err: any) {
+    console.error('[Marketplace API Error - PATCH /products/:id]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE product
+marketplaceRouter.delete('/products/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM marketplace_products WHERE id = $1', [id]);
+    return res.json({ success: true, message: 'Product deleted successfully' });
+  } catch (err: any) {
+    console.error('[Marketplace API Error - DELETE /products/:id]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==========================================
 // 2. REAL ESTATE PROPERTIES
 // ==========================================
@@ -352,6 +497,18 @@ marketplaceRouter.post('/properties', async (req: Request, res: Response) => {
     return res.status(201).json({ success: true, property: result.rows[0] });
   } catch (err: any) {
     console.error('[Marketplace API Error - POST /properties]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE property
+marketplaceRouter.delete('/properties/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM real_estate_properties WHERE id = $1', [id]);
+    return res.json({ success: true, message: 'Property deleted successfully' });
+  } catch (err: any) {
+    console.error('[Marketplace API Error - DELETE /properties/:id]:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
