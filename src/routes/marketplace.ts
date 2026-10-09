@@ -55,7 +55,11 @@ marketplaceRouter.get('/products', async (req: Request, res: Response) => {
       distanceKm: parseFloat(row.distance_km || '0'),
       postedAt: row.posted_at || 'Recently',
       viewsCount: row.views_count || 0,
-      images: Array.isArray(row.images) ? row.images : (typeof row.images === 'string' ? JSON.parse(row.images) : []),
+      images: (Array.isArray(row.images) ? row.images : (typeof row.images === 'string' ? JSON.parse(row.images) : [])).map((img: string) =>
+        img && img.startsWith('blob:')
+          ? 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=800&q=80'
+          : img
+      ),
       videoUrl: row.video_url,
       specs: typeof row.specs === 'object' ? row.specs : JSON.parse(row.specs || '{}'),
       seller: typeof row.seller === 'object' ? row.seller : JSON.parse(row.seller || '{}'),
@@ -92,7 +96,11 @@ marketplaceRouter.get('/products/:id', async (req: Request, res: Response) => {
       distanceKm: parseFloat(row.distance_km || '0'),
       postedAt: row.posted_at || 'Recently',
       viewsCount: row.views_count || 0,
-      images: Array.isArray(row.images) ? row.images : JSON.parse(row.images || '[]'),
+      images: (Array.isArray(row.images) ? row.images : JSON.parse(row.images || '[]')).map((img: string) =>
+        img && img.startsWith('blob:')
+          ? 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=800&q=80'
+          : img
+      ),
       videoUrl: row.video_url,
       specs: typeof row.specs === 'object' ? row.specs : JSON.parse(row.specs || '{}'),
       seller: typeof row.seller === 'object' ? row.seller : JSON.parse(row.seller || '{}'),
@@ -402,10 +410,20 @@ marketplaceRouter.get('/properties', async (req: Request, res: Response) => {
       contactNumber: row.contact_number,
       whatsappNumber: row.whatsapp_number,
       email: row.email,
-      photos: Array.isArray(row.photos) ? row.photos : (typeof row.photos === 'string' ? JSON.parse(row.photos) : []),
+      photos: (Array.isArray(row.photos) ? row.photos : (typeof row.photos === 'string' ? JSON.parse(row.photos) : [])).map((img: string) =>
+        img && img.startsWith('blob:')
+          ? 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=800&q=80'
+          : img
+      ),
       videos: Array.isArray(row.videos) ? row.videos : (typeof row.videos === 'string' ? JSON.parse(row.videos) : []),
-      coverImage: row.cover_image,
-      images: Array.isArray(row.images) ? row.images : (typeof row.images === 'string' ? JSON.parse(row.images) : []),
+      coverImage: row.cover_image && row.cover_image.startsWith('blob:')
+        ? 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=800&q=80'
+        : row.cover_image,
+      images: (Array.isArray(row.images) ? row.images : (typeof row.images === 'string' ? JSON.parse(row.images) : [])).map((img: string) =>
+        img && img.startsWith('blob:')
+          ? 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=800&q=80'
+          : img
+      ),
       isVerified: row.is_verified,
       status: row.status,
       specifications: typeof row.specifications === 'object' ? row.specifications : JSON.parse(row.specifications || '{}'),
