@@ -10,26 +10,41 @@ export const marketplaceRouter = Router();
 // GET all products with optional filters
 marketplaceRouter.get('/products', async (req: Request, res: Response) => {
   try {
-    const { category, search, condition, sortBy } = req.query;
+    const { category, search, condition, sortBy, status } = req.query;
 
-    let query = 'SELECT * FROM marketplace_products WHERE status = $1';
-    const params: any[] = ['active'];
-    let paramIndex = 2;
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (status && typeof status === 'string') {
+      if (status !== 'all') {
+        conditions.push(`status = $${paramIndex++}`);
+        params.push(status);
+      }
+    } else {
+      // By default return BOTH active and sold listings so all users/buyers see sold items with SOLD badge
+      conditions.push(`status IN ('active', 'sold')`);
+    }
 
     if (category && category !== 'all') {
-      query += ` AND category = $${paramIndex++}`;
+      conditions.push(`category = $${paramIndex++}`);
       params.push(category);
     }
 
     if (condition && condition !== 'all') {
-      query += ` AND condition = $${paramIndex++}`;
+      conditions.push(`condition = $${paramIndex++}`);
       params.push(condition);
     }
 
     if (search && typeof search === 'string' && search.trim()) {
-      query += ` AND (LOWER(title) LIKE $${paramIndex} OR LOWER(description) LIKE $${paramIndex} OR LOWER(location) LIKE $${paramIndex})`;
+      conditions.push(`(LOWER(title) LIKE $${paramIndex} OR LOWER(description) LIKE $${paramIndex} OR LOWER(location) LIKE $${paramIndex})`);
       params.push(`%${search.toLowerCase().trim()}%`);
       paramIndex++;
+    }
+
+    let query = 'SELECT * FROM marketplace_products';
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
     }
 
     if (sortBy === 'price_low') {
