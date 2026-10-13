@@ -149,7 +149,31 @@ export async function runMarketplaceMigration(): Promise<boolean> {
         CREATE INDEX IF NOT EXISTS idx_mp_reports_item ON marketplace_reports(item_id);
       `);
 
-      // 6. Ensure schema column extensions for existing tables
+      // 6. Marketplace Promotional Carousel Banners
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS marketplace_promo_banners (
+          id VARCHAR(64) PRIMARY KEY,
+          badge VARCHAR(128) DEFAULT 'SAVE 25% TODAY!',
+          title VARCHAR(255) NOT NULL,
+          subtitle VARCHAR(255) DEFAULT '',
+          button_text VARCHAR(64) DEFAULT 'Book Now',
+          button_link VARCHAR(255) DEFAULT '',
+          action_type VARCHAR(64) DEFAULT 'category',
+          action_payload VARCHAR(128) DEFAULT 'services',
+          image_url TEXT,
+          bg_gradient TEXT DEFAULT 'linear-gradient(135deg, #e0edfb 0%, #edf5fc 45%, #fff1e5 100%)',
+          badge_bg VARCHAR(64) DEFAULT '#ff5722',
+          btn_bg VARCHAR(64) DEFAULT '#ff6b00',
+          is_active BOOLEAN DEFAULT TRUE,
+          order_index INTEGER DEFAULT 0,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mp_banners_active ON marketplace_promo_banners(is_active, order_index);
+      `);
+
+      // 7. Ensure schema column extensions for existing tables
       await client.query(`
         -- Alter marketplace_products
         ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS subcategory VARCHAR(64);
@@ -197,6 +221,12 @@ export async function runMarketplaceMigration(): Promise<boolean> {
         ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;
         ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS admin_notes TEXT;
         ALTER TABLE marketplace_jobs ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+
+        -- Alter marketplace_promo_banners for Video & Target screen support & full poster mode
+        ALTER TABLE marketplace_promo_banners ADD COLUMN IF NOT EXISTS video_url TEXT;
+        ALTER TABLE marketplace_promo_banners ADD COLUMN IF NOT EXISTS media_type VARCHAR(32) DEFAULT 'image';
+        ALTER TABLE marketplace_promo_banners ADD COLUMN IF NOT EXISTS target_screen VARCHAR(32) DEFAULT 'all';
+        ALTER TABLE marketplace_promo_banners ADD COLUMN IF NOT EXISTS banner_style VARCHAR(32) DEFAULT 'split_template';
       `);
 
       // Check and Seed Initial Products
@@ -459,7 +489,72 @@ export async function runMarketplaceMigration(): Promise<boolean> {
         }
       }
 
-      console.log('[Marketplace Migration] Supabase tables ensured for marketplace_products, real_estate_properties, marketplace_jobs, marketplace_chats & marketplace_reports!');
+      // Check and Seed Initial Promotional Carousel Banners
+      const bannerCheck = await client.query('SELECT COUNT(*) FROM marketplace_promo_banners');
+      if (parseInt(bannerCheck.rows[0].count, 10) === 0) {
+        console.log('[Marketplace Migration] Seeding initial Marketplace promo banners into Supabase...');
+        const initialBanners = [
+          {
+            id: 'banner-home-service-1',
+            badge: 'SAVE 25% TODAY!',
+            title: 'Exclusive discounts on home service',
+            subtitle: 'VIBRANT GADGETS & ELECTRONICS MARKETPLACE\nYOUR ULTIMATE TECH DESTINATION!',
+            button_text: 'Book Now',
+            button_link: '',
+            action_type: 'category',
+            action_payload: 'services',
+            image_url: '/images/marketplace_banner.jpg',
+            bg_gradient: 'linear-gradient(135deg, #e0edfb 0%, #edf5fc 45%, #fff1e5 100%)',
+            badge_bg: '#ff5722',
+            btn_bg: '#ff6b00',
+            is_active: true,
+            order_index: 0
+          },
+          {
+            id: 'banner-tech-deals-2',
+            badge: 'HOT TECH DEALS',
+            title: 'Top Verified Gadgets & Laptops',
+            subtitle: 'Direct peer-to-peer verified sellers • Zero middleman fees',
+            button_text: 'Shop Gadgets',
+            button_link: '',
+            action_type: 'category',
+            action_payload: 'electronics',
+            image_url: 'https://images.unsplash.com/photo-1550009158-9ebf69173e03?auto=format&fit=crop&w=800&q=80',
+            bg_gradient: 'linear-gradient(135deg, #f0fdf4 0%, #e0f2fe 50%, #fef3c7 100%)',
+            badge_bg: '#059669',
+            btn_bg: '#0284c7',
+            is_active: true,
+            order_index: 1
+          },
+          {
+            id: 'banner-sell-fast-3',
+            badge: 'ZERO COMMISSION',
+            title: 'Sell Anything Locally in 2 Mins',
+            subtitle: 'Instant WhatsApp chat • Reach 50,000+ neighbors nearby',
+            button_text: 'Post Free Ad',
+            button_link: '',
+            action_type: 'post_ad',
+            action_payload: '',
+            image_url: 'https://images.unsplash.com/photo-1556742049-0a67e5572263?auto=format&fit=crop&w=800&q=80',
+            bg_gradient: 'linear-gradient(135deg, #fff1f2 0%, #ffe4e6 45%, #ffedd5 100%)',
+            badge_bg: '#e11d48',
+            btn_bg: '#ea580c',
+            is_active: true,
+            order_index: 2
+          }
+        ];
+
+        for (const b of initialBanners) {
+          await client.query(
+            `INSERT INTO marketplace_promo_banners (id, badge, title, subtitle, button_text, button_link, action_type, action_payload, image_url, bg_gradient, badge_bg, btn_bg, is_active, order_index)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT (id) DO NOTHING`,
+            [b.id, b.badge, b.title, b.subtitle, b.button_text, b.button_link, b.action_type, b.action_payload, b.image_url, b.bg_gradient, b.badge_bg, b.btn_bg, b.is_active, b.order_index]
+          );
+        }
+      }
+
+      console.log('[Marketplace Migration] Supabase tables ensured for marketplace_products, real_estate_properties, marketplace_jobs, marketplace_chats, marketplace_reports & marketplace_promo_banners!');
       return true;
     } finally {
       client.release();

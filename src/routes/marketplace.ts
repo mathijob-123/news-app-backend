@@ -1635,3 +1635,580 @@ marketplaceRouter.get('/admin/stats', async (_req: Request, res: Response) => {
   }
 });
 
+// ==========================================
+// 7. PROMOTIONAL CAROUSEL BANNERS API
+// ==========================================
+
+// In-memory fallback dataset for banners
+let inMemoryBanners: any[] = [
+  {
+    id: 'banner-home-service-1',
+    badge: 'SAVE 25% TODAY!',
+    title: 'Exclusive discounts on home service',
+    subtitle: 'VIBRANT GADGETS & ELECTRONICS MARKETPLACE\nYOUR ULTIMATE TECH DESTINATION!',
+    buttonText: 'Book Now',
+    buttonLink: '',
+    actionType: 'category',
+    actionPayload: 'services',
+    imageUrl: '/images/marketplace_banner.jpg',
+    videoUrl: '',
+    mediaType: 'image',
+    targetScreen: 'all',
+    bannerStyle: 'split_template',
+    bgGradient: 'linear-gradient(135deg, #e0edfb 0%, #edf5fc 45%, #fff1e5 100%)',
+    badgeBg: '#ff5722',
+    btnBg: '#ff6b00',
+    isActive: true,
+    orderIndex: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  },
+  {
+    id: 'banner-tech-deals-2',
+    badge: 'HOT TECH DEALS',
+    title: 'Top Verified Gadgets & Laptops',
+    subtitle: 'Direct peer-to-peer verified sellers • Zero middleman fees',
+    buttonText: 'Shop Gadgets',
+    buttonLink: '',
+    actionType: 'category',
+    actionPayload: 'electronics',
+    imageUrl: 'https://images.unsplash.com/photo-1550009158-9ebf69173e03?auto=format&fit=crop&w=800&q=80',
+    videoUrl: '',
+    mediaType: 'image',
+    targetScreen: 'all',
+    bannerStyle: 'split_template',
+    bgGradient: 'linear-gradient(135deg, #f0fdf4 0%, #e0f2fe 50%, #fef3c7 100%)',
+    badgeBg: '#059669',
+    btnBg: '#0284c7',
+    isActive: true,
+    orderIndex: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  },
+  {
+    id: 'banner-sell-fast-3',
+    badge: 'ZERO COMMISSION',
+    title: 'Sell Anything Locally in 2 Mins',
+    subtitle: 'Instant WhatsApp chat • Reach 50,000+ neighbors nearby',
+    buttonText: 'Post Free Ad',
+    buttonLink: '',
+    actionType: 'post_ad',
+    actionPayload: '',
+    imageUrl: 'https://images.unsplash.com/photo-1556742049-0a67e5572263?auto=format&fit=crop&w=800&q=80',
+    videoUrl: '',
+    mediaType: 'image',
+    targetScreen: 'all',
+    bannerStyle: 'split_template',
+    bgGradient: 'linear-gradient(135deg, #fff1f2 0%, #ffe4e6 45%, #ffedd5 100%)',
+    badgeBg: '#e11d48',
+    btnBg: '#ea580c',
+    isActive: true,
+    orderIndex: 2,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }
+];
+
+let isPromoBannersSectionEnabled = true;
+let promoBannerPlacement: 'top' | 'between' | 'both' = 'both';
+
+function formatBannerRow(row: any) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    title: row.title,
+    subtitle: row.subtitle || '',
+    buttonText: row.button_text || 'Book Now',
+    buttonLink: row.button_link || '',
+    actionType: row.action_type || 'category',
+    actionPayload: row.action_payload || '',
+    imageUrl: row.image_url || '',
+    videoUrl: row.video_url || '',
+    mediaType: row.media_type || (row.video_url ? 'video' : 'image'),
+    targetScreen: row.target_screen || 'all',
+    bannerStyle: (row.banner_style || 'split_template') as 'full_poster' | 'split_template',
+    bgGradient: row.bg_gradient || 'linear-gradient(135deg, #e0edfb 0%, #edf5fc 45%, #fff1e5 100%)',
+    badgeBg: row.badge_bg || '#ff5722',
+    btnBg: row.btn_bg || '#ff6b00',
+    isActive: row.is_active !== false,
+    orderIndex: typeof row.order_index === 'number' ? row.order_index : parseInt(row.order_index || '0', 10),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+// GET active banners for public Marketplace home (with screen filter and section visibility status)
+marketplaceRouter.get('/banners', async (req: Request, res: Response) => {
+  try {
+    const screen = (req.query.screen as string) || '';
+
+    // Check DB app_settings for banner visibility & placement
+    try {
+      const settingRes = await pool.query(
+        "SELECT key, value FROM app_settings WHERE key IN ('marketplace_banners_enabled', 'marketplace_banner_placement')"
+      );
+      settingRes.rows.forEach((r: any) => {
+        if (r.key === 'marketplace_banners_enabled') {
+          isPromoBannersSectionEnabled = r.value === 'true' || r.value === true;
+        } else if (r.key === 'marketplace_banner_placement') {
+          promoBannerPlacement = r.value as any;
+        }
+      });
+    } catch {
+      // ignore
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM marketplace_promo_banners WHERE is_active = true ORDER BY order_index ASC, created_at ASC'
+    );
+    let banners: any[] = result.rows.length > 0
+      ? result.rows.map(formatBannerRow)
+      : inMemoryBanners.filter((b) => b.isActive).sort((a, b) => a.orderIndex - b.orderIndex);
+
+    if (screen && screen !== 'all') {
+      banners = banners.filter((b: any) => !b.targetScreen || b.targetScreen === 'all' || b.targetScreen === screen);
+    }
+
+    return res.json({
+      success: true,
+      count: banners.length,
+      isSectionEnabled: isPromoBannersSectionEnabled,
+      bannerPlacement: promoBannerPlacement,
+      banners
+    });
+  } catch (err: any) {
+    console.warn('[Marketplace Banners Fallback]: Using in-memory fallback ->', err.message);
+    let activeMemory = inMemoryBanners
+      .filter((b) => b.isActive)
+      .sort((a, b) => a.orderIndex - b.orderIndex);
+    const screen = (req.query.screen as string) || '';
+    if (screen && screen !== 'all') {
+      activeMemory = activeMemory.filter((b: any) => !b.targetScreen || b.targetScreen === 'all' || b.targetScreen === screen);
+    }
+    return res.json({
+      success: true,
+      count: activeMemory.length,
+      isSectionEnabled: isPromoBannersSectionEnabled,
+      bannerPlacement: promoBannerPlacement,
+      banners: activeMemory
+    });
+  }
+});
+
+// GET banner section visibility status for Admin panel
+marketplaceRouter.get('/admin/banners/section-status', async (_req: Request, res: Response) => {
+  try {
+    const settingRes = await pool.query("SELECT value FROM app_settings WHERE key = 'marketplace_banners_enabled'");
+    if (settingRes.rows.length > 0) {
+      isPromoBannersSectionEnabled = settingRes.rows[0].value === 'true' || settingRes.rows[0].value === true;
+    }
+  } catch {
+    // ignore
+  }
+  return res.json({ success: true, isSectionEnabled: isPromoBannersSectionEnabled });
+});
+
+// POST toggle entire banner section on/off from Admin
+marketplaceRouter.post('/admin/banners/section-toggle', async (req: Request, res: Response) => {
+  try {
+    const { enabled } = req.body;
+    isPromoBannersSectionEnabled = Boolean(enabled);
+    try {
+      await pool.query(
+        `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ('marketplace_banners_enabled', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+        [isPromoBannersSectionEnabled ? 'true' : 'false']
+      );
+    } catch (e: any) {
+      console.warn('[DB Error on saving banner section toggle]:', e.message);
+    }
+    return res.json({ success: true, isSectionEnabled: isPromoBannersSectionEnabled });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET banner placement setting ('top' | 'between' | 'both')
+marketplaceRouter.get('/admin/banners/placement-status', async (_req: Request, res: Response) => {
+  try {
+    const settingRes = await pool.query("SELECT value FROM app_settings WHERE key = 'marketplace_banner_placement'");
+    if (settingRes.rows.length > 0 && settingRes.rows[0].value) {
+      promoBannerPlacement = settingRes.rows[0].value as any;
+    }
+  } catch {
+    // ignore
+  }
+  return res.json({ success: true, placement: promoBannerPlacement });
+});
+
+// POST update banner placement setting from Admin
+marketplaceRouter.post('/admin/banners/placement-toggle', async (req: Request, res: Response) => {
+  try {
+    const { placement } = req.body;
+    if (placement === 'top' || placement === 'between' || placement === 'both') {
+      promoBannerPlacement = placement;
+      try {
+        await pool.query(
+          `INSERT INTO app_settings (key, value, updated_at)
+           VALUES ('marketplace_banner_placement', $1, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+          [promoBannerPlacement]
+        );
+      } catch (e: any) {
+        console.warn('[DB Error on saving banner placement]:', e.message);
+      }
+    }
+    return res.json({ success: true, placement: promoBannerPlacement });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET all banners for Admin panel
+marketplaceRouter.get('/admin/banners', async (_req: Request, res: Response) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM marketplace_promo_banners ORDER BY order_index ASC, created_at ASC'
+    );
+    if (result.rows.length > 0) {
+      const banners = result.rows.map(formatBannerRow);
+      return res.json({
+        success: true,
+        count: banners.length,
+        isSectionEnabled: isPromoBannersSectionEnabled,
+        banners
+      });
+    }
+    return res.json({
+      success: true,
+      count: inMemoryBanners.length,
+      isSectionEnabled: isPromoBannersSectionEnabled,
+      banners: inMemoryBanners
+    });
+  } catch (err: any) {
+    console.warn('[Marketplace Admin Banners Fallback]: Using in-memory fallback ->', err.message);
+    return res.json({
+      success: true,
+      count: inMemoryBanners.length,
+      isSectionEnabled: isPromoBannersSectionEnabled,
+      banners: inMemoryBanners
+    });
+  }
+});
+
+// POST create new banner
+marketplaceRouter.post('/admin/banners', async (req: Request, res: Response) => {
+  try {
+    const {
+      id = `banner-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      badge = 'SPECIAL OFFER',
+      title = 'Exclusive Deals & Discounts',
+      subtitle = '',
+      buttonText = 'Book Now',
+      buttonLink = '',
+      actionType = 'category',
+      actionPayload = 'services',
+      imageUrl = '/images/marketplace_banner.jpg',
+      videoUrl = '',
+      mediaType = 'image',
+      targetScreen = 'all',
+      bannerStyle = 'split_template',
+      bgGradient = 'linear-gradient(135deg, #e0edfb 0%, #edf5fc 45%, #fff1e5 100%)',
+      badgeBg = '#ff5722',
+      btnBg = '#ff6b00',
+      isActive = true,
+      orderIndex
+    } = req.body;
+
+    let finalOrderIndex = typeof orderIndex === 'number' ? orderIndex : inMemoryBanners.length;
+
+    try {
+      if (typeof orderIndex !== 'number') {
+        const countRes = await pool.query('SELECT COALESCE(MAX(order_index) + 1, 0) as next_idx FROM marketplace_promo_banners');
+        finalOrderIndex = parseInt(countRes.rows[0]?.next_idx || '0', 10);
+      }
+
+      const insertRes = await pool.query(
+        `INSERT INTO marketplace_promo_banners 
+          (id, badge, title, subtitle, button_text, button_link, action_type, action_payload, image_url, video_url, media_type, target_screen, bg_gradient, badge_bg, btn_bg, is_active, order_index, banner_style, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())
+         RETURNING *`,
+        [id, badge, title, subtitle, buttonText, buttonLink, actionType, actionPayload, imageUrl, videoUrl, mediaType, targetScreen, bgGradient, badgeBg, btnBg, isActive, finalOrderIndex, bannerStyle]
+      );
+
+      const saved = formatBannerRow(insertRes.rows[0]);
+      inMemoryBanners.push(saved);
+      return res.status(201).json({ success: true, banner: saved });
+    } catch (dbErr: any) {
+      console.warn('[DB Error on create banner, fallback to memory]:', dbErr.message);
+      const newBanner = {
+        id,
+        badge,
+        title,
+        subtitle,
+        buttonText,
+        buttonLink,
+        actionType,
+        actionPayload,
+        imageUrl,
+        videoUrl,
+        mediaType,
+        targetScreen,
+        bannerStyle,
+        bgGradient,
+        badgeBg,
+        btnBg,
+        isActive,
+        orderIndex: finalOrderIndex,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      inMemoryBanners.push(newBanner as any);
+      return res.status(201).json({ success: true, banner: newBanner });
+    }
+  } catch (err: any) {
+    console.error('[Error POST /admin/banners]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT update banner
+marketplaceRouter.put('/admin/banners/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const {
+      badge,
+      title,
+      subtitle,
+      buttonText,
+      buttonLink,
+      actionType,
+      actionPayload,
+      imageUrl,
+      videoUrl,
+      mediaType,
+      targetScreen,
+      bannerStyle,
+      bgGradient,
+      badgeBg,
+      btnBg,
+      isActive,
+      orderIndex
+    } = req.body;
+
+    try {
+      const updateRes = await pool.query(
+        `UPDATE marketplace_promo_banners SET
+          badge = COALESCE($1, badge),
+          title = COALESCE($2, title),
+          subtitle = COALESCE($3, subtitle),
+          button_text = COALESCE($4, button_text),
+          button_link = COALESCE($5, button_link),
+          action_type = COALESCE($6, action_type),
+          action_payload = COALESCE($7, action_payload),
+          image_url = COALESCE($8, image_url),
+          video_url = COALESCE($9, video_url),
+          media_type = COALESCE($10, media_type),
+          target_screen = COALESCE($11, target_screen),
+          bg_gradient = COALESCE($12, bg_gradient),
+          badge_bg = COALESCE($13, badge_bg),
+          btn_bg = COALESCE($14, btn_bg),
+          is_active = COALESCE($15, is_active),
+          order_index = COALESCE($16, order_index),
+          banner_style = COALESCE($17, banner_style),
+          updated_at = NOW()
+        WHERE id = $18
+        RETURNING *`,
+        [badge, title, subtitle, buttonText, buttonLink, actionType, actionPayload, imageUrl, videoUrl, mediaType, targetScreen, bgGradient, badgeBg, btnBg, isActive, orderIndex, bannerStyle, id]
+      );
+
+      if (updateRes.rows.length > 0) {
+        const updated = formatBannerRow(updateRes.rows[0]);
+        inMemoryBanners = inMemoryBanners.map((b) => (b.id === id ? updated : b));
+        return res.json({ success: true, banner: updated });
+      }
+    } catch (dbErr: any) {
+      console.warn('[DB Error on update banner, falling back to memory]:', dbErr.message);
+    }
+
+    // In-memory update fallback
+    const idx = inMemoryBanners.findIndex((b) => b.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: 'Banner not found' });
+    }
+    const existing = inMemoryBanners[idx];
+    const updated = {
+      ...existing,
+      ...(badge !== undefined && { badge }),
+      ...(title !== undefined && { title }),
+      ...(subtitle !== undefined && { subtitle }),
+      ...(buttonText !== undefined && { buttonText }),
+      ...(buttonLink !== undefined && { buttonLink }),
+      ...(actionType !== undefined && { actionType }),
+      ...(actionPayload !== undefined && { actionPayload }),
+      ...(imageUrl !== undefined && { imageUrl }),
+      ...(videoUrl !== undefined && { videoUrl }),
+      ...(mediaType !== undefined && { mediaType }),
+      ...(targetScreen !== undefined && { targetScreen }),
+      ...(bgGradient !== undefined && { bgGradient }),
+      ...(badgeBg !== undefined && { badgeBg }),
+      ...(btnBg !== undefined && { btnBg }),
+      ...(isActive !== undefined && { isActive }),
+      ...(orderIndex !== undefined && { orderIndex }),
+      updatedAt: new Date().toISOString()
+    };
+    inMemoryBanners[idx] = updated;
+    return res.json({ success: true, banner: updated });
+  } catch (err: any) {
+    console.error('[Error PUT /admin/banners/:id]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE banner
+marketplaceRouter.delete('/admin/banners/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    try {
+      await pool.query('DELETE FROM marketplace_promo_banners WHERE id = $1', [id]);
+    } catch (dbErr: any) {
+      console.warn('[DB Error on delete banner]:', dbErr.message);
+    }
+
+    inMemoryBanners = inMemoryBanners.filter((b) => b.id !== id);
+    return res.json({ success: true, message: 'Banner deleted successfully' });
+  } catch (err: any) {
+    console.error('[Error DELETE /admin/banners/:id]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PATCH reorder banners
+marketplaceRouter.patch('/admin/banners/reorder', async (req: Request, res: Response) => {
+  try {
+    const { bannerIds } = req.body;
+    if (!Array.isArray(bannerIds)) {
+      return res.status(400).json({ success: false, error: 'bannerIds must be an array' });
+    }
+
+    try {
+      for (let i = 0; i < bannerIds.length; i++) {
+        await pool.query('UPDATE marketplace_promo_banners SET order_index = $1, updated_at = NOW() WHERE id = $2', [i, bannerIds[i]]);
+      }
+    } catch (dbErr: any) {
+      console.warn('[DB Error on reorder banners]:', dbErr.message);
+    }
+
+    // Update in-memory orders
+    inMemoryBanners.forEach((b) => {
+      const newIdx = bannerIds.indexOf(b.id);
+      if (newIdx !== -1) {
+        b.orderIndex = newIdx;
+      }
+    });
+    inMemoryBanners.sort((a, b) => a.orderIndex - b.orderIndex);
+
+    return res.json({ success: true, message: 'Banners reordered successfully' });
+  } catch (err: any) {
+    console.error('[Error PATCH /admin/banners/reorder]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST reset banners to initial defaults
+marketplaceRouter.post('/admin/banners/reset', async (_req: Request, res: Response) => {
+  try {
+    const defaults = [
+      {
+        id: 'banner-home-service-1',
+        badge: 'SAVE 25% TODAY!',
+        title: 'Exclusive discounts on home service',
+        subtitle: 'VIBRANT GADGETS & ELECTRONICS MARKETPLACE\nYOUR ULTIMATE TECH DESTINATION!',
+        button_text: 'Book Now',
+        button_link: '',
+        action_type: 'category',
+        action_payload: 'services',
+        image_url: '/images/marketplace_banner.jpg',
+        bg_gradient: 'linear-gradient(135deg, #e0edfb 0%, #edf5fc 45%, #fff1e5 100%)',
+        badge_bg: '#ff5722',
+        btn_bg: '#ff6b00',
+        is_active: true,
+        order_index: 0
+      },
+      {
+        id: 'banner-tech-deals-2',
+        badge: 'HOT TECH DEALS',
+        title: 'Top Verified Gadgets & Laptops',
+        subtitle: 'Direct peer-to-peer verified sellers • Zero middleman fees',
+        button_text: 'Shop Gadgets',
+        button_link: '',
+        action_type: 'category',
+        action_payload: 'electronics',
+        image_url: 'https://images.unsplash.com/photo-1550009158-9ebf69173e03?auto=format&fit=crop&w=800&q=80',
+        bg_gradient: 'linear-gradient(135deg, #f0fdf4 0%, #e0f2fe 50%, #fef3c7 100%)',
+        badge_bg: '#059669',
+        btn_bg: '#0284c7',
+        is_active: true,
+        order_index: 1
+      },
+      {
+        id: 'banner-sell-fast-3',
+        badge: 'ZERO COMMISSION',
+        title: 'Sell Anything Locally in 2 Mins',
+        subtitle: 'Instant WhatsApp chat • Reach 50,000+ neighbors nearby',
+        button_text: 'Post Free Ad',
+        button_link: '',
+        action_type: 'post_ad',
+        action_payload: '',
+        image_url: 'https://images.unsplash.com/photo-1556742049-0a67e5572263?auto=format&fit=crop&w=800&q=80',
+        bg_gradient: 'linear-gradient(135deg, #fff1f2 0%, #ffe4e6 45%, #ffedd5 100%)',
+        badge_bg: '#e11d48',
+        btn_bg: '#ea580c',
+        is_active: true,
+        order_index: 2
+      }
+    ];
+
+    try {
+      await pool.query('DELETE FROM marketplace_promo_banners');
+      for (const b of defaults) {
+        await pool.query(
+          `INSERT INTO marketplace_promo_banners 
+            (id, badge, title, subtitle, button_text, button_link, action_type, action_payload, image_url, bg_gradient, badge_bg, btn_bg, is_active, order_index)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          [b.id, b.badge, b.title, b.subtitle, b.button_text, b.button_link, b.action_type, b.action_payload, b.image_url, b.bg_gradient, b.badge_bg, b.btn_bg, b.is_active, b.order_index]
+        );
+      }
+    } catch (dbErr: any) {
+      console.warn('[DB Error on reset banners]:', dbErr.message);
+    }
+
+    inMemoryBanners = defaults.map((d) => ({
+      id: d.id,
+      badge: d.badge,
+      title: d.title,
+      subtitle: d.subtitle,
+      buttonText: d.button_text,
+      buttonLink: d.button_link,
+      actionType: d.action_type,
+      actionPayload: d.action_payload,
+      imageUrl: d.image_url,
+      bgGradient: d.bg_gradient,
+      badgeBg: d.badge_bg,
+      btnBg: d.btn_bg,
+      isActive: d.is_active,
+      orderIndex: d.order_index,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }));
+
+    return res.json({ success: true, banners: inMemoryBanners });
+  } catch (err: any) {
+    console.error('[Error POST /admin/banners/reset]:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
