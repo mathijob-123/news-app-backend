@@ -14,6 +14,7 @@ export async function runAuthMigration(): Promise<boolean> {
       // 1. Add authentication columns to public.users table if they do not exist
       await client.query(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255) UNIQUE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32);
         ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
         ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) DEFAULT 'user';
         ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(128) UNIQUE;

@@ -34,6 +34,7 @@ function mapUserRow(row: any): User {
     handle: row.handle,
     displayName: row.display_name,
     email: row.email || undefined,
+    phone: row.phone || undefined,
     role: (row.role as UserRole) || 'user',
     authProvider: (row.auth_provider as any) || 'local',
     avatar: row.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
@@ -77,6 +78,7 @@ authRouter.post('/register', async (req: Request, res: Response) => {
       displayName,
       handle,
       email,
+      phone,
       password,
       role = 'creator',
       avatar,
@@ -84,8 +86,8 @@ authRouter.post('/register', async (req: Request, res: Response) => {
       location
     } = req.body;
 
-    if (!displayName || !email || !password) {
-      return res.status(400).json({ success: false, error: 'Name, email, and password are required' });
+    if (!displayName || !email || !password || !phone) {
+      return res.status(400).json({ success: false, error: 'Name, mobile phone number, email, and password are required' });
     }
 
     if (password.length < 6) {
@@ -93,6 +95,7 @@ authRouter.post('/register', async (req: Request, res: Response) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
+    const cleanPhone = String(phone).trim().replace(/[^0-9+]/g, '');
     let cleanHandle = (handle || displayName.toLowerCase().replace(/[^a-z0-9_]/g, '_'))
       .replace(/^@+/, '')
       .replace(/[^a-zA-Z0-9_]/g, '_')
@@ -134,14 +137,14 @@ authRouter.post('/register', async (req: Request, res: Response) => {
     // Insert user into Supabase
     await pool.query(
       `INSERT INTO users (
-        id, handle, display_name, email, password_hash, role, auth_provider,
+        id, handle, display_name, email, phone, password_hash, role, auth_provider,
         avatar, bio, home_location, is_creator, creator_tier,
         trust_score, verified, follower_count, following_count, wallet_id,
         created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, 'local',
-        $7, $8, $9, $10, 'bronze',
-        100, $11, 0, 0, $12,
+        $1, $2, $3, $4, $5, $6, $7, 'local',
+        $8, $9, $10, $11, 'bronze',
+        100, $12, 0, 0, $13,
         NOW(), NOW()
       )`,
       [
@@ -149,6 +152,7 @@ authRouter.post('/register', async (req: Request, res: Response) => {
         cleanHandle,
         displayName.trim(),
         cleanEmail,
+        cleanPhone,
         passwordHash,
         userRole,
         userAvatar,

@@ -34,6 +34,7 @@ export interface User {
   handle: string;
   displayName: string;
   email?: string;
+  phone?: string;
   role: UserRole;
   authProvider?: 'local' | 'google';
   avatar: string;
