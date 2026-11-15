@@ -641,6 +641,22 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
   p.priceAward = p.priceAward || 0;
   p.rpmRate = p.rpmRate || 350;
 
+  const defaultCdnVideos = [
+    'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1790055069322_p0l98f.mp4',
+    'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1789997093458_sk5cm0.mp4',
+    'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1789996953775_f7x7uj.mp4',
+    'https://pub-5051362230a34232ba4afb2cf7ac345c.r2.dev/videos/1789995126975_l0csk7.mp4'
+  ];
+
+  if (!p.mediaUrl || p.mediaUrl.startsWith('blob:') || p.mediaUrl.includes('commondatastorage.googleapis.com')) {
+    p.mediaUrl = defaultCdnVideos[Math.floor(Math.random() * defaultCdnVideos.length)];
+  }
+  if (!p.thumbnailUrl || p.thumbnailUrl.startsWith('blob:')) {
+    p.thumbnailUrl = 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600';
+  }
+  p.creatorName = p.creatorName || 'Spotlight Reporter';
+  p.creatorHandle = p.creatorHandle || 'reporter';
+
   // Always keep memPosts updated so fast lookups and in-memory fallbacks work
   const mIdx = memPosts.findIndex((item) => item.id === p.id);
   if (mIdx >= 0) {
