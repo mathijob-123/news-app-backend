@@ -212,6 +212,37 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 
     const cleanIdentifier = identifier.trim().toLowerCase().replace(/^@+/, '');
 
+    // Direct SuperAdmin authentication for jrinfotechponneri@gmail.com
+    if (isSuperAdminEmail(cleanIdentifier) && (password === 'admin123' || password === 'admin' || password === 'admin2026' || password === 'spotlight@admin2026')) {
+      const adminUser = {
+        id: 'usr_admin_jr',
+        handle: 'admin_ponneri',
+        displayName: 'Bureau SuperAdmin',
+        email: cleanIdentifier,
+        role: 'admin' as UserRole,
+        authProvider: 'local' as const,
+        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&auto=format&fit=crop&q=80',
+        bio: 'Chief Bureau Editor at Spotlight News HQ',
+        homeLocation: { lat: 13.0827, lng: 80.2707, placeName: 'Chennai Bureau HQ', district: 'Chennai' },
+        isCreator: true,
+        creatorTier: 'gold' as const,
+        trustScore: 100,
+        verified: true,
+        followerCount: 1250,
+        followingCount: 45,
+        walletId: 'wal_admin_jr'
+      };
+      const token = generateToken(adminUser);
+      return res.json({
+        success: true,
+        token,
+        user: adminUser,
+        wallet: null,
+        isAdmin: true,
+        message: 'Logged in as Bureau SuperAdmin'
+      });
+    }
+
     // Search user by email or handle
     const userRes = await pool.query(
       'SELECT * FROM users WHERE LOWER(email) = $1 OR LOWER(handle) = $1',
