@@ -1,6 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../config/db.js';
 
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xylbmwffyaoojnvrjmlx.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh5bGJtd2ZmeWFvb2pudnJqbWx4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ3MTk4MzYsImV4cCI6MjExMDI5NTgzNn0._hBoUkJRX9y84qa9lPnFNFDx5OzidF5hKQ0c3Rft_BQ';
+
 export const marketplaceRouter = Router();
 
 // ==========================================
@@ -86,6 +89,38 @@ marketplaceRouter.get('/products', async (req: Request, res: Response) => {
     return res.json({ success: true, count: products.length, products });
   } catch (err: any) {
     console.error('[Marketplace API Error - GET /products]:', err.message);
+    try {
+      const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/marketplace_products?order=created_at.desc`, {
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+        }
+      });
+      if (supaRes.ok) {
+        const rows = await supaRes.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          const products = rows.map((row: any) => ({
+            id: row.id,
+            title: row.title,
+            price: parseFloat(row.price),
+            priceNegotiable: row.price_negotiable,
+            category: row.category,
+            condition: row.condition,
+            description: row.description,
+            location: row.location,
+            distanceKm: parseFloat(row.distance_km || '0'),
+            viewsCount: row.views_count || 0,
+            images: Array.isArray(row.images) ? row.images : [],
+            specs: typeof row.specs === 'object' ? row.specs : {},
+            seller: typeof row.seller === 'object' ? row.seller : {},
+            status: row.status || 'active',
+            isFavorite: false,
+            createdAt: row.created_at
+          }));
+          return res.json({ success: true, count: products.length, products });
+        }
+      }
+    } catch {}
     return res.status(500).json({ success: false, error: err.message });
   }
 });
