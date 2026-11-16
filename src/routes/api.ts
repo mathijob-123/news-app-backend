@@ -3140,7 +3140,7 @@ apiRouter.get('/notifications', async (req: Request, res: Response) => {
   if (hasDb) {
     try {
       const result = await pool.query(
-        `SELECT * FROM user_notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+        `SELECT * FROM user_notifications WHERE user_id = $1 AND id != 'notif_welcome' AND title NOT LIKE '%Community Standing Notice%' ORDER BY created_at DESC LIMIT 50`,
         [userId]
       );
       const notifs = result.rows.map(mapNotificationRow);
@@ -3150,7 +3150,11 @@ apiRouter.get('/notifications', async (req: Request, res: Response) => {
     }
   }
 
-  const userNotifs = memNotifications.filter((n) => n.userId === userId || n.userId === 'all');
+  const userNotifs = memNotifications.filter(
+    (n) => (n.userId === userId || n.userId === 'all') &&
+      n.id !== 'notif_welcome' &&
+      !n.title?.includes('Community Standing Notice')
+  );
   res.json({ success: true, count: userNotifs.length, data: userNotifs, source: 'in_memory' });
 });
 

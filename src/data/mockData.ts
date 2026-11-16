@@ -419,15 +419,5 @@ export const INITIAL_COPYRIGHT_REPORTS: CopyrightReport[] = [
 
 export const INITIAL_COPYRIGHT_STRIKES: CopyrightStrike[] = [];
 
-export const INITIAL_NOTIFICATIONS: AppNotification[] = [
-  {
-    id: 'notif_welcome',
-    userId: 'usr_tn_001',
-    title: 'Spotlight360 Community Standing Notice',
-    message: 'Welcome to Spotlight360! Please ensure all news dispatches are original eyewitness recordings or credited appropriately to avoid copyright strikes.',
-    type: 'system',
-    read: false,
-    createdAt: new Date(Date.now() - 86400000).toISOString()
-  }
-];
+export const INITIAL_NOTIFICATIONS: AppNotification[] = [];
 
