@@ -4,7 +4,10 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const connectionString = process.env.DATABASE_URL;
+let connectionString = process.env.DATABASE_URL;
+if (!connectionString || connectionString.includes('caqbfbdhotkotcyknrux')) {
+  connectionString = 'postgresql://postgres.xylbmwffyaoojnvrjmlx:vedaspark%402418@aws-0-ap-south-1.pooler.supabase.com:5432/postgres';
+}
 
 export const pool = new Pool({
   connectionString,
