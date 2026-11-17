@@ -25,8 +25,8 @@ marketplaceRouter.get('/products', async (req: Request, res: Response) => {
         params.push(status);
       }
     } else {
-      // By default return BOTH active and sold listings so all users/buyers see sold items with SOLD badge
-      conditions.push(`status IN ('active', 'sold')`);
+      // By default return active, sold and out_of_stock listings so all users/buyers see full listings with Out of Stock / Sold badge
+      conditions.push(`status IN ('active', 'sold', 'out_of_stock')`);
     }
 
     if (category && category !== 'all') {
