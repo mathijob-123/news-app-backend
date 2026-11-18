@@ -959,6 +959,136 @@ apiRouter.post('/posts/:id/like', async (req: Request, res: Response) => {
   return res.json({ success: true, likeCount: finalCount });
 });
 
+// ==========================================
+// SMART VIDEO FEED: WATCH HISTORY & RECOMMENDATION
+// ==========================================
+
+// 1. Record video watch
+apiRouter.post('/videos/watch', async (req: Request, res: Response) => {
+  const { userId, postId, cycleNumber = 1 } = req.body;
+  if (!userId || !postId) {
+    return res.status(400).json({ success: false, error: 'userId and postId are required' });
+  }
+
+  const watchId = `wh_${userId}_${postId}`;
+  const now = new Date().toISOString();
+
+  // A. Supabase REST Upsert (immune to serverless connection issues)
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/video_watch_history`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates'
+      },
+      body: JSON.stringify({
+        id: watchId,
+        user_id: userId,
+        post_id: postId,
+        watched_at: now,
+        cycle_number: Number(cycleNumber) || 1
+      })
+    });
+  } catch (supaErr: any) {
+    console.warn('[API /videos/watch Supabase notice]:', supaErr.message);
+  }
+
+  // B. Dual-write to DB Pool
+  if (hasDb) {
+    try {
+      await pool.query(
+        `INSERT INTO video_watch_history (id, user_id, post_id, watched_at, watch_count, cycle_number)
+         VALUES ($1, $2, $3, NOW(), 1, $4)
+         ON CONFLICT (user_id, post_id)
+         DO UPDATE SET watched_at = NOW(), watch_count = video_watch_history.watch_count + 1, cycle_number = $4`,
+        [watchId, userId, postId, Number(cycleNumber) || 1]
+      );
+      // Increment view_count on video_posts
+      await pool.query(
+        `UPDATE video_posts SET view_count = COALESCE(view_count, 0) + 1, updated_at = NOW() WHERE id = $1`,
+        [postId]
+      );
+    } catch (dbErr: any) {
+      console.warn('[API /videos/watch Pool notice]:', dbErr.message);
+    }
+  }
+
+  // C. Update in-memory post view count
+  const post = memPosts.find((p) => p.id === postId);
+  if (post) {
+    post.viewCount = (post.viewCount || 0) + 1;
+  }
+
+  return res.json({ success: true, userId, postId, watchedAt: now });
+});
+
+// 2. Get watch history for user
+apiRouter.get('/videos/watch-history/:userId', async (req: Request, res: Response) => {
+  const userId = req.params.userId as string;
+  const cycle = req.query.cycle ? Number(req.query.cycle) : undefined;
+
+  // A. Supabase REST
+  try {
+    let url = `${SUPABASE_URL}/rest/v1/video_watch_history?user_id=eq.${encodeURIComponent(userId)}&select=post_id,watched_at,cycle_number`;
+    if (cycle !== undefined) {
+      url += `&cycle_number=eq.${cycle}`;
+    }
+    const supaRes = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      }
+    });
+    if (supaRes.ok) {
+      const rows = await supaRes.json();
+      if (Array.isArray(rows)) {
+        return res.json({
+          success: true,
+          watchedPostIds: rows.map((r: any) => r.post_id),
+          history: rows
+        });
+      }
+    }
+  } catch (supaErr: any) {
+    console.warn('[API /videos/watch-history Supabase notice]:', supaErr.message);
+  }
+
+  // B. Pool fallback
+  if (hasDb) {
+    try {
+      let query = 'SELECT post_id, watched_at, cycle_number FROM video_watch_history WHERE user_id = $1';
+      const params: any[] = [userId];
+      if (cycle !== undefined) {
+        params.push(cycle);
+        query += ' AND cycle_number = $2';
+      }
+      const result = await pool.query(query, params);
+      return res.json({
+        success: true,
+        watchedPostIds: result.rows.map((r: any) => r.post_id),
+        history: result.rows
+      });
+    } catch (dbErr: any) {
+      console.warn('[API /videos/watch-history Pool notice]:', dbErr.message);
+    }
+  }
+
+  return res.json({ success: true, watchedPostIds: [], history: [] });
+});
+
+// 3. Reset/Advance watch cycle for user
+apiRouter.post('/videos/reset-cycle', async (req: Request, res: Response) => {
+  const { userId, newCycleNumber } = req.body;
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'userId is required' });
+  }
+
+  const nextCycle = Number(newCycleNumber) || 2;
+  return res.json({ success: true, userId, currentCycle: nextCycle });
+});
+
 // Delete a video post / citizen dispatch
 apiRouter.delete('/posts/:id', async (req: Request, res: Response) => {
   const postId = req.params.id as string;
