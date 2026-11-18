@@ -1625,6 +1625,38 @@ apiRouter.post('/wallet/payout', async (req: Request, res: Response) => {
 // --- COMMENTS ROUTES ---
 apiRouter.get('/comments/:postId', async (req: Request, res: Response) => {
   const postId = req.params.postId as string;
+
+  // 1. First attempt Supabase REST directly (serverless safe)
+  try {
+    const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/comments?post_id=eq.${encodeURIComponent(postId)}&order=created_at.asc`, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      }
+    });
+    if (supaRes.ok) {
+      const rows = await supaRes.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        return res.json({
+          success: true,
+          data: rows.map((r: any) => ({
+            id: r.id,
+            postId: r.post_id,
+            userHandle: r.user_handle,
+            userName: r.user_name,
+            userAvatar: r.user_avatar,
+            content: r.content,
+            likes: Number(r.likes || 0),
+            createdAt: r.created_at
+          }))
+        });
+      }
+    }
+  } catch (err: any) {
+    console.warn('[API /comments/:postId Supabase REST notice]:', err.message);
+  }
+
+  // 2. Fallback to pool if connected
   if (hasDb) {
     try {
       const result = await pool.query('SELECT * FROM comments WHERE post_id = $1 ORDER BY created_at ASC', [postId]);
@@ -1650,14 +1682,14 @@ apiRouter.get('/comments/:postId', async (req: Request, res: Response) => {
 
 apiRouter.post('/comments/:postId', async (req: Request, res: Response) => {
   const postId = req.params.postId as string;
-  const { content, userHandle, userName, userAvatar } = req.body;
+  const { content, userHandle, userName, userAvatar, id } = req.body;
 
   if (!content) {
     return res.status(400).json({ success: false, error: 'Comment content is required' });
   }
 
   const newComment: Comment = {
-    id: `cmt_${Date.now()}`,
+    id: id || `cmt_${Date.now()}`,
     postId,
     userHandle: userHandle || memUser.handle,
     userName: userName || memUser.displayName,
@@ -1667,15 +1699,59 @@ apiRouter.post('/comments/:postId', async (req: Request, res: Response) => {
     likes: 0
   };
 
+  // 1. Insert into Supabase REST directly
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/comments`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify({
+        id: newComment.id,
+        post_id: newComment.postId,
+        user_handle: newComment.userHandle,
+        user_name: newComment.userName,
+        user_avatar: newComment.userAvatar,
+        content: newComment.content,
+        likes: 0,
+        created_at: newComment.createdAt
+      })
+    });
+
+    // Update comment_count on video_posts
+    const postsRes = await fetch(`${SUPABASE_URL}/rest/v1/video_posts?id=eq.${encodeURIComponent(postId)}&select=comment_count`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+    });
+    if (postsRes.ok) {
+      const rows: any = await postsRes.json();
+      const currentCount = Number(rows?.[0]?.comment_count || 0);
+      await fetch(`${SUPABASE_URL}/rest/v1/video_posts?id=eq.${encodeURIComponent(postId)}`, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ comment_count: currentCount + 1 })
+      });
+    }
+  } catch (err: any) {
+    console.warn('[API /comments/:postId Supabase REST notice]:', err.message);
+  }
+
+  // 2. Dual-write to DB pool if connected
   if (hasDb) {
     try {
       await pool.query(
         `INSERT INTO comments (id, post_id, user_handle, user_name, user_avatar, content, likes, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (id) DO NOTHING`,
         [newComment.id, newComment.postId, newComment.userHandle, newComment.userName, newComment.userAvatar, newComment.content, 0, newComment.createdAt]
       );
       await pool.query('UPDATE video_posts SET comment_count = comment_count + 1 WHERE id = $1', [postId]);
-      return res.status(201).json({ success: true, data: newComment });
     } catch (err: any) {
       console.warn('[DB Comment Insert Error]:', err.message);
     }
