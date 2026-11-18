@@ -870,6 +870,95 @@ apiRouter.patch('/posts/:id', async (req: Request, res: Response) => {
   return res.json({ success: true, data: fallbackPost });
 });
 
+// Toggle / update like count for a video post
+apiRouter.post('/posts/:id/like', async (req: Request, res: Response) => {
+  const postId = req.params.id as string;
+  const { isLiked, likeCount, userId } = req.body;
+
+  let finalCount: number | null = null;
+  if (typeof likeCount === 'number') {
+    finalCount = Math.max(0, likeCount);
+  }
+
+  // 1. Update Supabase REST API (immune to serverless connection issues)
+  try {
+    if (finalCount !== null) {
+      await fetch(`${SUPABASE_URL}/rest/v1/video_posts?id=eq.${encodeURIComponent(postId)}`, {
+        method: 'PATCH',
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          like_count: finalCount,
+          updated_at: new Date().toISOString()
+        })
+      });
+    }
+
+    if (userId) {
+      if (isLiked) {
+        await fetch(`${SUPABASE_URL}/rest/v1/post_likes`, {
+          method: 'POST',
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'resolution=ignore-duplicates'
+          },
+          body: JSON.stringify({ post_id: postId, user_id: userId })
+        });
+      } else {
+        await fetch(`${SUPABASE_URL}/rest/v1/post_likes?post_id=eq.${encodeURIComponent(postId)}&user_id=eq.${encodeURIComponent(userId)}`, {
+          method: 'DELETE',
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+          }
+        });
+      }
+    }
+  } catch (err: any) {
+    console.warn('[API /posts/:id/like Supabase REST notice]:', err.message);
+  }
+
+  // 2. Dual-update pool if connected
+  if (hasDb) {
+    try {
+      if (finalCount !== null) {
+        await pool.query(
+          'UPDATE video_posts SET like_count = $1, updated_at = NOW() WHERE id = $2',
+          [finalCount, postId]
+        );
+      }
+      if (userId) {
+        if (isLiked) {
+          await pool.query(
+            'INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2) ON CONFLICT (post_id, user_id) DO NOTHING',
+            [postId, userId]
+          );
+        } else {
+          await pool.query(
+            'DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2',
+            [postId, userId]
+          );
+        }
+      }
+    } catch (dbErr: any) {
+      console.warn('[API /posts/:id/like Pool notice]:', dbErr.message);
+    }
+  }
+
+  // 3. Update memory posts cache
+  const idx = memPosts.findIndex((p) => p.id === postId);
+  if (idx !== -1 && finalCount !== null) {
+    memPosts[idx].likeCount = finalCount;
+  }
+
+  return res.json({ success: true, likeCount: finalCount });
+});
+
 // Delete a video post / citizen dispatch
 apiRouter.delete('/posts/:id', async (req: Request, res: Response) => {
   const postId = req.params.id as string;
