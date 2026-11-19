@@ -25,6 +25,9 @@ export interface LocationCoordinates {
   district?: string;
   pincode?: string;
   radiusMeters?: number;
+  locationId?: string;
+  taluk?: string;
+  area?: string;
 }
 
 export type UserRole = 'user' | 'creator' | 'admin';
@@ -102,6 +105,10 @@ export interface VideoPost {
   caption: string;
   category: NewsCategory;
   location: LocationCoordinates;
+  locationId?: string;
+  district?: string;
+  taluk?: string;
+  area?: string;
   sourceCitation: string | null;
   durationSeconds: number;
   status: 'draft' | 'in_review' | 'published' | 'removed' | 'rejected' | 'copyright_takedown' | 'scheduled';

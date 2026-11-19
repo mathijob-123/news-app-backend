@@ -19,9 +19,12 @@ export const CURRENT_USER: User = {
   avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80',
   bio: 'Citizen journalist reporting on civic, traffic, and community news across Chennai & Tiruvallur Districts.',
   homeLocation: {
+    locationId: 'chennai_central',
     placeName: 'Chennai Central & Parrys',
     neighborhood: 'Chennai Central Hub',
     district: 'Chennai',
+    taluk: 'Egmore',
+    area: 'Chennai Central',
     lat: 13.0827,
     lng: 80.2707,
     radiusMeters: 4000

@@ -82,7 +82,17 @@ function getCleanHeadline(headline?: string | null, caption?: string | null, fal
 
 // Row mappers
 function mapPostRow(row: any): VideoPost {
-  const loc = typeof row.location === 'string' ? JSON.parse(row.location) : row.location;
+  const loc = typeof row.location === 'string' ? JSON.parse(row.location) : (row.location || {});
+  const locId = row.location_id || loc?.locationId;
+  const district = row.district || loc?.district;
+  const taluk = row.taluk || loc?.taluk;
+  const area = row.area || loc?.area;
+
+  if (locId && !loc.locationId) loc.locationId = locId;
+  if (district && !loc.district) loc.district = district;
+  if (taluk && !loc.taluk) loc.taluk = taluk;
+  if (area && !loc.area) loc.area = area;
+
   const cleanHeadline = isCrypticHash(row.headline)
     ? getCleanHeadline(row.headline, row.caption, loc?.neighborhood || loc?.placeName)
     : row.headline;
@@ -109,6 +119,10 @@ function mapPostRow(row: any): VideoPost {
     caption: row.caption,
     category: row.category,
     location: loc,
+    locationId: locId,
+    district,
+    taluk,
+    area,
     sourceCitation: cleanSource,
     durationSeconds: Number(row.duration_seconds || 0),
     status: row.status,
@@ -529,24 +543,53 @@ apiRouter.post('/upload/direct', async (req: Request, res: Response) => {
   }
 });
 
+function normalizeBackendLocId(id?: any): string {
+  if (!id || typeof id !== 'string') return '';
+  const clean = id.trim().toLowerCase();
+  if (clean === 'thiruvallur' || clean === 'tiruvallur') return 'tiruvallur';
+  return clean;
+}
+
 // --- POSTS ROUTES ---
 apiRouter.get('/posts', async (req: Request, res: Response) => {
-  const { status, includeScheduled } = req.query;
+  const { status, includeScheduled, locationId, district, taluk, page, limit } = req.query;
+  const normLocId = normalizeBackendLocId(locationId);
+
   if (hasDb) {
     try {
       let query = 'SELECT * FROM video_posts';
       const params: any[] = [];
+      const whereConditions: string[] = [];
+
       if (status && status !== 'all') {
         if (status === 'pending' || status === 'in_review') {
-          query += " WHERE (status = 'in_review' OR admin_review_status = 'pending_review')";
+          whereConditions.push("(status = 'in_review' OR admin_review_status = 'pending_review')");
         } else {
           params.push(status);
-          query += ` WHERE status = $1`;
+          whereConditions.push(`status = $${params.length}`);
         }
       } else if (!includeScheduled && status !== 'all') {
-        query += " WHERE (status IN ('published', 'in_review', 'rejected') OR status IS NULL)";
+        whereConditions.push("(status IN ('published', 'in_review', 'rejected') OR status IS NULL)");
       }
+
+      if (normLocId) {
+        params.push(normLocId);
+        whereConditions.push(`(location_id = $${params.length} OR location->>'locationId' = $${params.length})`);
+      }
+
+      if (whereConditions.length > 0) {
+        query += ' WHERE ' + whereConditions.join(' AND ');
+      }
+
       query += ' ORDER BY created_at DESC';
+
+      if (limit) {
+        const l = Math.min(Math.max(1, parseInt(limit as string) || 50), 100);
+        const p = Math.max(1, parseInt((page as string) || '1') || 1);
+        const offset = (p - 1) * l;
+        query += ` LIMIT ${l} OFFSET ${offset}`;
+      }
+
       const result = await pool.query(query, params);
       if (result.rows && result.rows.length > 0) {
         const posts = result.rows.map(mapPostRow);
@@ -559,7 +602,18 @@ apiRouter.get('/posts', async (req: Request, res: Response) => {
 
   // Resilient fallback to Supabase REST API (guarantees cross-user persistence on serverless)
   try {
-    const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/video_posts?order=created_at.desc`, {
+    let supaEndpoint = `${SUPABASE_URL}/rest/v1/video_posts?order=created_at.desc`;
+    if (normLocId) {
+      supaEndpoint = `${SUPABASE_URL}/rest/v1/video_posts?location_id=eq.${encodeURIComponent(normLocId)}&order=created_at.desc`;
+    }
+    if (limit) {
+      const l = Math.min(Math.max(1, parseInt(limit as string) || 50), 100);
+      const p = Math.max(1, parseInt((page as string) || '1') || 1);
+      const offset = (p - 1) * l;
+      supaEndpoint += `&limit=${l}&offset=${offset}`;
+    }
+
+    const supaRes = await fetch(supaEndpoint, {
       headers: {
         apikey: SUPABASE_ANON_KEY,
         Authorization: `Bearer ${SUPABASE_ANON_KEY}`
@@ -580,6 +634,9 @@ apiRouter.get('/posts', async (req: Request, res: Response) => {
   }
 
   let filtered = [...memPosts];
+  if (normLocId) {
+    filtered = filtered.filter((p) => normalizeBackendLocId(p.locationId || p.location?.locationId) === normLocId);
+  }
   if (status && status !== 'all') {
     if (status === 'pending' || status === 'in_review') {
       filtered = filtered.filter((p) => p.status === 'in_review' || p.adminReviewStatus === 'pending_review');
@@ -657,6 +714,22 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
   p.creatorName = p.creatorName || 'Spotlight Reporter';
   p.creatorHandle = p.creatorHandle || 'reporter';
 
+  const resolvedLocId = normalizeBackendLocId(p.locationId || p.location?.locationId || (p.location?.neighborhood ? p.location.neighborhood.toLowerCase().replace(/[^a-z0-9]/g, '') : 'ponneri'));
+  const resolvedDistrict = p.district || p.location?.district || 'Tiruvallur';
+  const resolvedTaluk = p.taluk || p.location?.taluk || 'Ponneri';
+  const resolvedArea = p.area || p.location?.area || p.location?.placeName || 'Ponneri';
+
+  p.locationId = resolvedLocId;
+  p.district = resolvedDistrict;
+  p.taluk = resolvedTaluk;
+  p.area = resolvedArea;
+  if (p.location) {
+    p.location.locationId = resolvedLocId;
+    p.location.district = resolvedDistrict;
+    p.location.taluk = resolvedTaluk;
+    p.location.area = resolvedArea;
+  }
+
   // Always keep memPosts updated so fast lookups and in-memory fallbacks work
   const mIdx = memPosts.findIndex((item) => item.id === p.id);
   if (mIdx >= 0) {
@@ -673,9 +746,11 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
           id, creator_id, creator_name, creator_handle, creator_avatar, creator_verified,
           type, media_url, thumbnail_url, headline, caption, category, location,
           source_citation, duration_seconds, status, is_breaking, admin_review_status,
-          admin_payout_amount, price_award, rpm_rate, admin_bounty_awarded, created_at
+          admin_payout_amount, price_award, rpm_rate, admin_bounty_awarded, created_at,
+          location_id, district, taluk, area
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+          $24, $25, $26, $27
         ) ON CONFLICT (id) DO UPDATE SET
           headline = EXCLUDED.headline,
           caption = EXCLUDED.caption,
@@ -683,12 +758,18 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
           admin_review_status = EXCLUDED.admin_review_status,
           price_award = EXCLUDED.price_award,
           rpm_rate = EXCLUDED.rpm_rate,
+          location_id = EXCLUDED.location_id,
+          district = EXCLUDED.district,
+          taluk = EXCLUDED.taluk,
+          area = EXCLUDED.area,
+          location = EXCLUDED.location,
           updated_at = NOW()`,
         [
           p.id, p.creatorId || 'usr_tn_001', p.creatorName, p.creatorHandle, p.creatorAvatar, p.creatorVerified || false,
           p.type || 'video', p.mediaUrl, p.thumbnailUrl, p.headline, p.caption, p.category, JSON.stringify(p.location),
           p.sourceCitation || null, p.durationSeconds || 0, p.status, p.isBreaking || false,
-          p.adminReviewStatus, p.adminPayoutAmount || 0, p.priceAward || 0, p.rpmRate || 350, p.adminBountyAwarded || 0, p.createdAt
+          p.adminReviewStatus, p.adminPayoutAmount || 0, p.priceAward || 0, p.rpmRate || 350, p.adminBountyAwarded || 0, p.createdAt,
+          resolvedLocId, resolvedDistrict, resolvedTaluk, resolvedArea
         ]
       );
       return res.status(201).json({ success: true, data: p, source: 'supabase_postgres' });
@@ -721,6 +802,10 @@ apiRouter.post('/posts', async (req: Request, res: Response) => {
         caption: p.caption,
         category: p.category,
         location: p.location,
+        location_id: resolvedLocId,
+        district: resolvedDistrict,
+        taluk: resolvedTaluk,
+        area: resolvedArea,
         source_citation: p.sourceCitation || null,
         duration_seconds: p.durationSeconds || 0,
         status: p.status || 'published',
