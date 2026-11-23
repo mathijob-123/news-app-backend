@@ -2826,6 +2826,584 @@ apiRouter.delete('/admin/users/:id', async (req: Request, res: Response) => {
 });
 
 // ==========================================
+// --- APP USER MANAGEMENT (ADMIN) ---
+// ==========================================
+
+// Helper function to fetch enriched users from DB or Supabase REST
+async function fetchEnrichedAppUsers(): Promise<any[]> {
+  // 1. Try PostgreSQL pool if connected
+  if (hasDb) {
+    try {
+      const result = await pool.query(`
+        SELECT u.*,
+               COALESCE(w.balance, 0) AS wallet_balance,
+               COALESCE(w.lifetime_earnings, 0) AS lifetime_earnings,
+               COALESCE(w.payout_method, 'UPI Direct (Not Linked)') AS payout_method,
+               COALESCE(v.video_count, 0) AS video_count
+        FROM users u
+        LEFT JOIN wallets w ON w.user_id = u.id
+        LEFT JOIN (
+          SELECT creator_id, COUNT(*) AS video_count
+          FROM video_posts
+          GROUP BY creator_id
+        ) v ON v.creator_id = u.id
+        ORDER BY u.created_at DESC
+      `);
+      if (result.rows && result.rows.length > 0) {
+        return result.rows.map((row) => ({
+          ...mapUserRow(row),
+          walletBalance: Number(row.wallet_balance || 0),
+          lifetimeEarnings: Number(row.lifetime_earnings || 0),
+          payoutMethod: row.payout_method,
+          videoCount: Number(row.video_count || 0),
+          accountStatus: row.upload_blocked ? 'suspended' : 'active',
+          createdAt: row.created_at
+        }));
+      }
+    } catch (err: any) {
+      console.warn('[DB fetchEnrichedAppUsers Error]:', err.message);
+    }
+  }
+
+  // 2. Try Supabase REST
+  try {
+    const supaHeaders = {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    };
+
+    const [usersRes, walletsRes, videosRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/rest/v1/users?select=*&order=created_at.desc`, { headers: supaHeaders }),
+      fetch(`${SUPABASE_URL}/rest/v1/wallets?select=*`, { headers: supaHeaders }).catch(() => null),
+      fetch(`${SUPABASE_URL}/rest/v1/video_posts?select=id,creator_id`, { headers: supaHeaders }).catch(() => null)
+    ]);
+
+    if (usersRes.ok) {
+      const usersData: any[] = (await usersRes.json()) as any[];
+      const walletsData: any[] = walletsRes && walletsRes.ok ? ((await walletsRes.json()) as any[]) : [];
+      const videosData: any[] = videosRes && videosRes.ok ? ((await videosRes.json()) as any[]) : [];
+
+      const walletMap = new Map<string, any>();
+      walletsData.forEach((w) => walletMap.set(w.user_id, w));
+
+      const videoCountMap = new Map<string, number>();
+      videosData.forEach((v) => {
+        const cId = v.creator_id;
+        if (cId) videoCountMap.set(cId, (videoCountMap.get(cId) || 0) + 1);
+      });
+
+      return usersData.map((row) => {
+        const u = mapUserRow(row);
+        const wal = walletMap.get(u.id);
+        const vCount = videoCountMap.get(u.id) || 0;
+        return {
+          ...u,
+          walletBalance: Number(wal?.balance || 0),
+          lifetimeEarnings: Number(wal?.lifetime_earnings || 0),
+          payoutMethod: wal?.payout_method || 'UPI Direct (Not Linked)',
+          videoCount: vCount,
+          accountStatus: u.uploadBlocked ? 'suspended' : 'active',
+          createdAt: row.created_at
+        };
+      });
+    }
+  } catch (err: any) {
+    console.warn('[Supabase REST fetchEnrichedAppUsers Error]:', err.message);
+  }
+
+  // 3. Fallback: in-memory users
+  return [
+    {
+      ...memUser,
+      walletBalance: memWallet.balance,
+      lifetimeEarnings: memWallet.lifetimeEarnings,
+      payoutMethod: memWallet.payoutMethod,
+      videoCount: memPosts.filter((p) => p.creatorId === memUser.id).length,
+      accountStatus: memUser.uploadBlocked ? 'suspended' : 'active',
+      createdAt: new Date().toISOString()
+    }
+  ];
+}
+
+// 1. Get all app users with search & filters
+apiRouter.get('/admin/app-users', async (req: Request, res: Response) => {
+  try {
+    const { search, role, status, verified } = req.query;
+    let users = await fetchEnrichedAppUsers();
+
+    if (search && typeof search === 'string') {
+      const q = search.toLowerCase().trim();
+      users = users.filter((u) =>
+        (u.displayName && u.displayName.toLowerCase().includes(q)) ||
+        (u.handle && u.handle.toLowerCase().includes(q)) ||
+        (u.email && u.email.toLowerCase().includes(q)) ||
+        (u.phone && u.phone.includes(q)) ||
+        (u.homeLocation?.district && u.homeLocation.district.toLowerCase().includes(q)) ||
+        (u.homeLocation?.placeName && u.homeLocation.placeName.toLowerCase().includes(q))
+      );
+    }
+
+    if (role && typeof role === 'string' && role !== 'all') {
+      users = users.filter((u) => (u.role || 'user').toLowerCase() === role.toLowerCase());
+    }
+
+    if (status && typeof status === 'string' && status !== 'all') {
+      if (status === 'active') {
+        users = users.filter((u) => !u.uploadBlocked);
+      } else if (status === 'suspended') {
+        users = users.filter((u) => u.uploadBlocked);
+      }
+    }
+
+    if (verified === 'true') {
+      users = users.filter((u) => u.verified);
+    }
+
+    res.json({
+      success: true,
+      data: users,
+      total: users.length
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Get single app user details with their videos and copyright reports
+apiRouter.get('/admin/app-users/:id', async (req: Request, res: Response) => {
+  const userId = req.params.id as string;
+  try {
+    const allUsers = await fetchEnrichedAppUsers();
+    const user = allUsers.find((u) => u.id === userId);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Fetch user's videos
+    let userVideos: VideoPost[] = [];
+    if (hasDb) {
+      try {
+        const vRes = await pool.query('SELECT * FROM video_posts WHERE creator_id = $1 ORDER BY created_at DESC', [userId]);
+        userVideos = vRes.rows.map(mapPostRow);
+      } catch {}
+    }
+    if (userVideos.length === 0) {
+      userVideos = memPosts.filter((p) => p.creatorId === userId);
+    }
+
+    // Fetch user's copyright reports
+    const userReports = memReports.filter((r) => r.postCreatorId === userId);
+
+    res.json({
+      success: true,
+      data: {
+        user,
+        videos: userVideos,
+        copyrightReports: userReports
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Create a new app user / creator / reporter
+apiRouter.post('/admin/app-users', async (req: Request, res: Response) => {
+  try {
+    const {
+      displayName,
+      handle,
+      email,
+      phone,
+      role = 'creator',
+      bio = '',
+      verified = false,
+      district = 'Chennai',
+      placeName = 'Chennai Central',
+      initialPoints = 0
+    } = req.body;
+
+    if (!displayName || !handle) {
+      return res.status(400).json({ success: false, error: 'Display Name and Handle are required' });
+    }
+
+    const cleanHandle = handle.replace(/^@/, '').toLowerCase().trim();
+    const cleanEmail = email ? email.toLowerCase().trim() : `${cleanHandle}@spotlight.local`;
+    const userId = `usr_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    const walletId = `wal_${userId}`;
+
+    const homeLocation = {
+      placeName: placeName || `${district} Central`,
+      district: district || 'Chennai',
+      lat: 13.0827,
+      lng: 80.2707
+    };
+
+    const newUserRecord: any = {
+      id: userId,
+      handle: cleanHandle,
+      display_name: displayName.trim(),
+      email: cleanEmail,
+      phone: phone || '',
+      role,
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${cleanHandle}`,
+      bio: bio || `Verified ${role} on Spotlight 360`,
+      home_location: homeLocation,
+      is_creator: role === 'creator' || role === 'reporter',
+      creator_tier: 'bronze',
+      trust_score: 100,
+      verified: Boolean(verified),
+      follower_count: 0,
+      following_count: 0,
+      wallet_id: walletId,
+      upload_blocked: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    // Insert into DB if available
+    if (hasDb) {
+      try {
+        await pool.query(
+          `INSERT INTO users (id, handle, display_name, email, role, avatar, bio, home_location, is_creator, verified, wallet_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [
+            newUserRecord.id,
+            newUserRecord.handle,
+            newUserRecord.display_name,
+            newUserRecord.email,
+            newUserRecord.role,
+            newUserRecord.avatar,
+            newUserRecord.bio,
+            JSON.stringify(newUserRecord.home_location),
+            newUserRecord.is_creator,
+            newUserRecord.verified,
+            newUserRecord.wallet_id,
+            newUserRecord.created_at,
+            newUserRecord.updated_at
+          ]
+        );
+
+        await pool.query(
+          `INSERT INTO wallets (id, user_id, balance, lifetime_earnings, this_month_earnings, payout_method, updated_at)
+           VALUES ($1, $2, $3, $3, $3, 'UPI Direct (Not Linked)', NOW())
+           ON CONFLICT (id) DO NOTHING`,
+          [walletId, userId, Number(initialPoints || 0)]
+        );
+      } catch (dbErr: any) {
+        console.warn('[DB User Insert Error]:', dbErr.message);
+      }
+    }
+
+    // Also sync to Supabase REST
+    try {
+      const supaHeaders = {
+        'Content-Type': 'application/json',
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Prefer: 'return=representation'
+      };
+      await fetch(`${SUPABASE_URL}/rest/v1/users`, {
+        method: 'POST',
+        headers: supaHeaders,
+        body: JSON.stringify(newUserRecord)
+      });
+      await fetch(`${SUPABASE_URL}/rest/v1/wallets`, {
+        method: 'POST',
+        headers: supaHeaders,
+        body: JSON.stringify({
+          id: walletId,
+          user_id: userId,
+          balance: Number(initialPoints || 0),
+          lifetime_earnings: Number(initialPoints || 0),
+          this_month_earnings: Number(initialPoints || 0),
+          payout_method: 'UPI Direct (Not Linked)',
+          updated_at: new Date().toISOString()
+        })
+      });
+    } catch (restErr: any) {
+      console.warn('[Supabase REST Insert Error]:', restErr.message);
+    }
+
+    const mapped = {
+      ...mapUserRow(newUserRecord),
+      walletBalance: Number(initialPoints || 0),
+      videoCount: 0,
+      accountStatus: 'active'
+    };
+
+    res.status(201).json({ success: true, data: mapped });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Update an existing app user
+apiRouter.patch('/admin/app-users/:id', async (req: Request, res: Response) => {
+  const userId = req.params.id as string;
+  const updates = req.body;
+  try {
+    const cleanHandle = updates.handle ? updates.handle.replace(/^@/, '').toLowerCase().trim() : undefined;
+    const cleanEmail = updates.email ? updates.email.toLowerCase().trim() : undefined;
+
+    if (hasDb) {
+      try {
+        await pool.query(
+          `UPDATE users SET
+            display_name = COALESCE($1, display_name),
+            handle = COALESCE($2, handle),
+            email = COALESCE($3, email),
+            role = COALESCE($4, role),
+            bio = COALESCE($5, bio),
+            verified = COALESCE($6, verified),
+            trust_score = COALESCE($7, trust_score),
+            upload_blocked = COALESCE($8, upload_blocked),
+            upload_blocked_reason = COALESCE($9, upload_blocked_reason),
+            home_location = COALESCE($10, home_location),
+            updated_at = NOW()
+           WHERE id = $11`,
+          [
+            updates.displayName,
+            cleanHandle,
+            cleanEmail,
+            updates.role,
+            updates.bio,
+            updates.verified !== undefined ? updates.verified : null,
+            updates.trustScore !== undefined ? updates.trustScore : null,
+            updates.uploadBlocked !== undefined ? updates.uploadBlocked : null,
+            updates.uploadBlockedReason !== undefined ? updates.uploadBlockedReason : null,
+            updates.homeLocation ? JSON.stringify(updates.homeLocation) : null,
+            userId
+          ]
+        );
+      } catch (dbErr: any) {
+        console.warn('[DB User Update Error]:', dbErr.message);
+      }
+    }
+
+    // Update via Supabase REST
+    try {
+      const supaPayload: any = { updated_at: new Date().toISOString() };
+      if (updates.displayName) supaPayload.display_name = updates.displayName;
+      if (cleanHandle) supaPayload.handle = cleanHandle;
+      if (cleanEmail) supaPayload.email = cleanEmail;
+      if (updates.role) supaPayload.role = updates.role;
+      if (updates.bio !== undefined) supaPayload.bio = updates.bio;
+      if (updates.verified !== undefined) supaPayload.verified = updates.verified;
+      if (updates.trustScore !== undefined) supaPayload.trust_score = updates.trustScore;
+      if (updates.uploadBlocked !== undefined) {
+        supaPayload.upload_blocked = updates.uploadBlocked;
+        supaPayload.upload_blocked_reason = updates.uploadBlockedReason || null;
+      }
+      if (updates.homeLocation) supaPayload.home_location = updates.homeLocation;
+
+      await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          Prefer: 'return=representation'
+        },
+        body: JSON.stringify(supaPayload)
+      });
+    } catch (restErr: any) {
+      console.warn('[Supabase REST Update Error]:', restErr.message);
+    }
+
+    if (userId === memUser.id) {
+      if (updates.displayName) memUser.displayName = updates.displayName;
+      if (cleanHandle) memUser.handle = cleanHandle;
+      if (updates.verified !== undefined) memUser.verified = updates.verified;
+      if (updates.role) memUser.role = updates.role;
+      if (updates.uploadBlocked !== undefined) memUser.uploadBlocked = updates.uploadBlocked;
+    }
+
+    res.json({ success: true, message: 'User updated successfully' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Delete an app user
+apiRouter.delete('/admin/app-users/:id', async (req: Request, res: Response) => {
+  const userId = req.params.id as string;
+  try {
+    if (hasDb) {
+      try {
+        await pool.query('DELETE FROM wallets WHERE user_id = $1', [userId]);
+        await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+      } catch (dbErr: any) {
+        console.warn('[DB User Delete Error]:', dbErr.message);
+      }
+    }
+
+    try {
+      const supaHeaders = {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      };
+      await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+        headers: supaHeaders
+      });
+      await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+        headers: supaHeaders
+      });
+    } catch (restErr: any) {
+      console.warn('[Supabase REST Delete Error]:', restErr.message);
+    }
+
+    res.json({ success: true, message: 'User deleted successfully' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Adjust user's wallet points
+apiRouter.post('/admin/app-users/:id/points', async (req: Request, res: Response) => {
+  const userId = req.params.id as string;
+  const { amount = 0, reason = 'Admin points adjustment' } = req.body;
+  const pts = Number(amount);
+
+  try {
+    if (hasDb) {
+      try {
+        await pool.query(
+          `UPDATE wallets SET
+             balance = GREATEST(0, balance + $1),
+             lifetime_earnings = CASE WHEN $1 > 0 THEN lifetime_earnings + $1 ELSE lifetime_earnings END,
+             this_month_earnings = CASE WHEN $1 > 0 THEN this_month_earnings + $1 ELSE this_month_earnings END,
+             updated_at = NOW()
+           WHERE user_id = $2`,
+          [pts, userId]
+        );
+      } catch (err: any) {
+        console.warn('[DB adjust points error]:', err.message);
+      }
+    }
+
+    // Also adjust via Supabase REST
+    try {
+      const supaHeaders = {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+      };
+      const walRes = await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}`, { headers: supaHeaders });
+      if (walRes.ok) {
+        const rows: any = await walRes.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          const cur = rows[0];
+          const newBal = Math.max(0, Number(cur.balance || 0) + pts);
+          const newLifetime = pts > 0 ? Number(cur.lifetime_earnings || 0) + pts : Number(cur.lifetime_earnings || 0);
+          await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}`, {
+            method: 'PATCH',
+            headers: {
+              ...supaHeaders,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              balance: newBal,
+              lifetime_earnings: newLifetime,
+              updated_at: new Date().toISOString()
+            })
+          });
+        }
+      }
+    } catch {}
+
+    res.json({ success: true, message: `Points successfully adjusted (${pts > 0 ? '+' : ''}${pts})` });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Toggle verification badge
+apiRouter.post('/admin/app-users/:id/toggle-verify', async (req: Request, res: Response) => {
+  const userId = req.params.id as string;
+  try {
+    let newVerified = true;
+    const supaHeaders = {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    };
+    const uRes = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, { headers: supaHeaders });
+    if (uRes.ok) {
+      const rows: any = await uRes.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        newVerified = !rows[0].verified;
+      }
+    }
+
+    if (hasDb) {
+      try {
+        await pool.query('UPDATE users SET verified = $1, updated_at = NOW() WHERE id = $2', [newVerified, userId]);
+      } catch {}
+    }
+
+    await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      headers: {
+        ...supaHeaders,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ verified: newVerified, updated_at: new Date().toISOString() })
+    });
+
+    res.json({ success: true, verified: newVerified });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 8. Toggle account suspension / upload block
+apiRouter.post('/admin/app-users/:id/toggle-status', async (req: Request, res: Response) => {
+  const userId = req.params.id as string;
+  const { reason = 'Account suspended by administrator' } = req.body;
+  try {
+    let newBlocked = true;
+    const supaHeaders = {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+    };
+    const uRes = await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, { headers: supaHeaders });
+    if (uRes.ok) {
+      const rows: any = await uRes.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        newBlocked = !rows[0].upload_blocked;
+      }
+    }
+
+    if (hasDb) {
+      try {
+        await pool.query(
+          'UPDATE users SET upload_blocked = $1, upload_blocked_reason = $2, updated_at = NOW() WHERE id = $3',
+          [newBlocked, newBlocked ? reason : null, userId]
+        );
+      } catch {}
+    }
+
+    await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      headers: {
+        ...supaHeaders,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        upload_blocked: newBlocked,
+        upload_blocked_reason: newBlocked ? reason : null,
+        updated_at: new Date().toISOString()
+      })
+    });
+
+    res.json({ success: true, uploadBlocked: newBlocked, status: newBlocked ? 'suspended' : 'active' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
 // --- SOCIAL MEDIA CONTENT IMPORTS API ---
 // ==========================================
 
