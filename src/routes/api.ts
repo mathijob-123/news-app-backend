@@ -419,6 +419,30 @@ function checkDuplicate(rawTitle: string, rawContent: string, externalId?: strin
 }
 
 
+// Proxy endpoint to download/stream media files with full CORS support for direct file sharing
+apiRouter.get('/media-download', async (req: Request, res: Response) => {
+  const mediaUrl = req.query.url as string;
+  const filename = (req.query.filename as string) || 'spotlight_video.mp4';
+  if (!mediaUrl) {
+    return res.status(400).json({ success: false, error: 'Missing media URL parameter' });
+  }
+  try {
+    const upstreamRes = await fetch(mediaUrl);
+    if (!upstreamRes.ok) {
+      return res.status(upstreamRes.status).send('Failed to fetch media');
+    }
+    const contentType = upstreamRes.headers.get('content-type') || 'video/mp4';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    const arrayBuf = await upstreamRes.arrayBuffer();
+    return res.send(Buffer.from(arrayBuf));
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Health check
 apiRouter.get('/health', async (_req: Request, res: Response) => {
   let dbStatus = 'unconfigured';
@@ -1843,7 +1867,7 @@ apiRouter.get('/comments/:postId', async (req: Request, res: Response) => {
 
   // 1. First attempt Supabase REST directly (serverless safe)
   try {
-    const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/comments?post_id=eq.${encodeURIComponent(postId)}&order=created_at.asc`, {
+    const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/comments?post_id=eq.${encodeURIComponent(postId)}&order=created_at.desc`, {
       headers: {
         apikey: SUPABASE_ANON_KEY,
         Authorization: `Bearer ${SUPABASE_ANON_KEY}`
@@ -1854,16 +1878,21 @@ apiRouter.get('/comments/:postId', async (req: Request, res: Response) => {
       if (Array.isArray(rows) && rows.length > 0) {
         return res.json({
           success: true,
-          data: rows.map((r: any) => ({
-            id: r.id,
-            postId: r.post_id,
-            userHandle: r.user_handle,
-            userName: r.user_name,
-            userAvatar: r.user_avatar,
-            content: r.content,
-            likes: Number(r.likes || 0),
-            createdAt: r.created_at
-          }))
+          data: rows
+            .filter((r: any) => r.status !== 'hidden')
+            .map((r: any) => ({
+              id: r.id,
+              postId: r.post_id,
+              userId: r.user_id || r.user_handle,
+              userHandle: r.user_handle,
+              userName: r.user_name,
+              userAvatar: r.user_avatar,
+              content: r.content,
+              likes: Number(r.likes || 0),
+              status: r.status || 'active',
+              createdAt: r.created_at,
+              updatedAt: r.updated_at
+            }))
         });
       }
     }
@@ -1874,18 +1903,21 @@ apiRouter.get('/comments/:postId', async (req: Request, res: Response) => {
   // 2. Fallback to pool if connected
   if (hasDb) {
     try {
-      const result = await pool.query('SELECT * FROM comments WHERE post_id = $1 ORDER BY created_at ASC', [postId]);
+      const result = await pool.query('SELECT * FROM comments WHERE post_id = $1 AND (status != $2 OR status IS NULL) ORDER BY created_at DESC', [postId, 'hidden']);
       return res.json({
         success: true,
         data: result.rows.map((r: any) => ({
           id: r.id,
           postId: r.post_id,
+          userId: r.user_id || r.user_handle,
           userHandle: r.user_handle,
           userName: r.user_name,
           userAvatar: r.user_avatar,
           content: r.content,
           likes: Number(r.likes || 0),
-          createdAt: r.created_at
+          status: r.status || 'active',
+          createdAt: r.created_at,
+          updatedAt: r.updated_at
         }))
       });
     } catch (err: any) {
@@ -1897,20 +1929,23 @@ apiRouter.get('/comments/:postId', async (req: Request, res: Response) => {
 
 apiRouter.post('/comments/:postId', async (req: Request, res: Response) => {
   const postId = req.params.postId as string;
-  const { content, userHandle, userName, userAvatar, id } = req.body;
+  const { content, userHandle, userName, userAvatar, userId, id } = req.body;
 
   if (!content) {
     return res.status(400).json({ success: false, error: 'Comment content is required' });
   }
 
   const newComment: Comment = {
-    id: id || `cmt_${Date.now()}`,
+    id: id || `cmt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     postId,
+    userId: userId || userHandle || memUser.id,
     userHandle: userHandle || memUser.handle,
     userName: userName || memUser.displayName,
     userAvatar: userAvatar || memUser.avatar,
     content,
+    status: 'active',
     createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     likes: 0
   };
 
@@ -1927,12 +1962,15 @@ apiRouter.post('/comments/:postId', async (req: Request, res: Response) => {
       body: JSON.stringify({
         id: newComment.id,
         post_id: newComment.postId,
+        user_id: newComment.userId,
         user_handle: newComment.userHandle,
         user_name: newComment.userName,
         user_avatar: newComment.userAvatar,
         content: newComment.content,
+        status: 'active',
         likes: 0,
-        created_at: newComment.createdAt
+        created_at: newComment.createdAt,
+        updated_at: newComment.updatedAt
       })
     });
 
@@ -1961,10 +1999,14 @@ apiRouter.post('/comments/:postId', async (req: Request, res: Response) => {
   if (hasDb) {
     try {
       await pool.query(
-        `INSERT INTO comments (id, post_id, user_handle, user_name, user_avatar, content, likes, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO comments (id, post_id, user_id, user_handle, user_name, user_avatar, content, likes, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (id) DO NOTHING`,
-        [newComment.id, newComment.postId, newComment.userHandle, newComment.userName, newComment.userAvatar, newComment.content, 0, newComment.createdAt]
+        [
+          newComment.id, newComment.postId, newComment.userId,
+          newComment.userHandle, newComment.userName, newComment.userAvatar,
+          newComment.content, 0, 'active', newComment.createdAt, newComment.updatedAt
+        ]
       );
       await pool.query('UPDATE video_posts SET comment_count = comment_count + 1 WHERE id = $1', [postId]);
     } catch (err: any) {
@@ -1973,7 +2015,7 @@ apiRouter.post('/comments/:postId', async (req: Request, res: Response) => {
   }
 
   if (!memComments[postId]) memComments[postId] = [];
-  memComments[postId].unshift(newComment);
+  memComments[postId] = [newComment, ...memComments[postId].filter((c) => c.id !== newComment.id)];
   res.status(201).json({ success: true, data: newComment });
 });
 

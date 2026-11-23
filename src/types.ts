@@ -82,11 +82,14 @@ export interface AuthResponse {
 export interface Comment {
   id: string;
   postId: string;
+  userId?: string;
   userHandle: string;
   userName: string;
   userAvatar: string;
   content: string;
   createdAt: string;
+  updatedAt?: string;
+  status?: string;
   likes: number;
   isLiked?: boolean;
 }
