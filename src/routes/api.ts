@@ -871,6 +871,275 @@ apiRouter.get('/posts/:id', async (req: Request, res: Response) => {
   res.json({ success: true, data: post });
 });
 
+/**
+ * Rich Open Graph / Twitter Card Video Preview Endpoint
+ * Renders server-side HTML with full Open Graph tags so WhatsApp, Instagram, Facebook, and Twitter
+ * display a rich video preview card (with thumbnail, headline, and location badge) instead of generic login page.
+ * Human browsers are instantly redirected to the frontend app with the reel query parameter.
+ */
+export async function handleReelSharePreview(req: Request, res: Response) {
+  const rawId = req.params.id;
+  const postId = (Array.isArray(rawId) ? rawId[0] : rawId || '').trim();
+  let post: VideoPost | null = null;
+
+  if (postId) {
+    if (hasDb) {
+      try {
+        const result = await pool.query('SELECT * FROM video_posts WHERE id = $1', [postId]);
+        if (result.rows.length > 0) {
+          post = mapPostRow(result.rows[0]);
+        }
+      } catch (err: any) {
+        console.warn('[DB Error handleReelSharePreview]:', err.message);
+      }
+    }
+
+    if (!post) {
+      post = memPosts.find((p) => p.id === postId) || null;
+    }
+
+    if (!post) {
+      try {
+        const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/video_posts?id=eq.${encodeURIComponent(postId)}&select=*`, {
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          },
+        });
+        if (supaRes.ok) {
+          const rows = await supaRes.json();
+          if (Array.isArray(rows) && rows.length > 0) {
+            post = mapPostRow(rows[0]);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Supabase REST Fetch Error handleReelSharePreview]:', err.message);
+      }
+    }
+  }
+
+  const escapeHtml = (text?: string | null) =>
+    (text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+  const headline = post?.headline || post?.caption || 'Spotlight 360 Ground Report';
+  const locationText =
+    post?.location?.placeName ||
+    post?.location?.neighborhood ||
+    post?.location?.district ||
+    post?.district ||
+    'Hyperlocal Report';
+
+  const title = `🎬 ${headline} | Spotlight 360`;
+  const description = `📍 ${locationText} • Watch verified hyperlocal news reel on Spotlight 360`;
+  const thumbnailUrl =
+    post?.thumbnailUrl && !post.thumbnailUrl.startsWith('blob:')
+      ? post.thumbnailUrl
+      : 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=1080&auto=format&fit=crop';
+  const mediaUrl = post?.mediaUrl && !post.mediaUrl.startsWith('blob:') ? post.mediaUrl : '';
+  const frontendUrl = 'https://news-app-frontend-mathis-projects-a3546874.vercel.app';
+  const redirectTarget = `${frontendUrl}?post=${encodeURIComponent(postId || '')}`;
+  const canonicalUrl = `https://news-app-backend-mathis-projects-a3546874.vercel.app/reel/${encodeURIComponent(postId || '')}`;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>${escapeHtml(title)}</title>
+
+  <!-- Open Graph / WhatsApp / Instagram / Facebook / Telegram -->
+  <meta property="og:site_name" content="Spotlight 360" />
+  <meta property="og:type" content="video.other" />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(description)}" />
+  <meta property="og:url" content="${escapeHtml(canonicalUrl)}" />
+  
+  <!-- Video Thumbnail (1080x1920 Reel Format) -->
+  <meta property="og:image" content="${escapeHtml(thumbnailUrl)}" />
+  <meta property="og:image:secure_url" content="${escapeHtml(thumbnailUrl)}" />
+  <meta property="og:image:type" content="image/jpeg" />
+  <meta property="og:image:width" content="1080" />
+  <meta property="og:image:height" content="1920" />
+  <meta property="og:image:alt" content="${escapeHtml(headline)}" />
+
+  ${mediaUrl ? `
+  <meta property="og:video" content="${escapeHtml(mediaUrl)}" />
+  <meta property="og:video:secure_url" content="${escapeHtml(mediaUrl)}" />
+  <meta property="og:video:type" content="video/mp4" />
+  <meta property="og:video:width" content="1080" />
+  <meta property="og:video:height" content="1920" />
+  ` : ''}
+
+  <!-- Twitter / X Card Tags -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:site" content="@Spotlight360" />
+  <meta name="twitter:title" content="${escapeHtml(title)}" />
+  <meta name="twitter:description" content="${escapeHtml(description)}" />
+  <meta name="twitter:image" content="${escapeHtml(thumbnailUrl)}" />
+
+  <!-- Instant Browser Redirect to Spotlight 360 App -->
+  <meta http-equiv="refresh" content="0;url=${escapeHtml(redirectTarget)}" />
+  <link rel="canonical" href="${escapeHtml(redirectTarget)}" />
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #09090b;
+      color: #f4f4f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .reel-container {
+      width: 100%;
+      max-width: 420px;
+      background: #18181b;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7);
+      text-align: center;
+    }
+    .thumb-wrapper {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 9/16;
+      max-height: 480px;
+      background: #000;
+      overflow: hidden;
+    }
+    .thumb-wrapper img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .play-button {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 68px;
+      height: 68px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 30px rgba(234, 88, 12, 0.7);
+    }
+    .play-triangle {
+      width: 0;
+      height: 0;
+      border-top: 13px solid transparent;
+      border-bottom: 13px solid transparent;
+      border-left: 22px solid #ffffff;
+      margin-left: 4px;
+    }
+    .info-section {
+      padding: 20px 18px 24px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      color: #ea580c;
+      background: rgba(234, 88, 12, 0.15);
+      padding: 4px 10px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+    .title {
+      font-size: 17px;
+      font-weight: 800;
+      line-height: 1.4;
+      color: #ffffff;
+      margin-bottom: 8px;
+    }
+    .location {
+      font-size: 13px;
+      font-weight: 600;
+      color: #a1a1aa;
+      margin-bottom: 20px;
+    }
+    .cta-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 14px 20px;
+      background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
+      color: #ffffff;
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 800;
+      border-radius: 14px;
+      box-shadow: 0 6px 20px rgba(234, 88, 12, 0.4);
+      transition: transform 0.15s ease;
+    }
+    .cta-button:active {
+      transform: scale(0.98);
+    }
+    .footer-note {
+      font-size: 11px;
+      color: #71717a;
+      margin-top: 14px;
+    }
+  </style>
+
+  <script>
+    try {
+      window.location.replace(${JSON.stringify(redirectTarget)});
+    } catch (e) {
+      window.location.href = ${JSON.stringify(redirectTarget)};
+    }
+  </script>
+</head>
+<body>
+  <div class="reel-container">
+    <div class="thumb-wrapper">
+      <img src="${escapeHtml(thumbnailUrl)}" alt="${escapeHtml(headline)}" />
+      <div class="play-button">
+        <div class="play-triangle"></div>
+      </div>
+    </div>
+    <div class="info-section">
+      <div class="badge">🔴 Spotlight 360 Ground Report</div>
+      <h1 class="title">${escapeHtml(headline)}</h1>
+      <p class="location">📍 ${escapeHtml(locationText)}</p>
+      <a href="${escapeHtml(redirectTarget)}" class="cta-button">
+        ▶ Watch Reel on Spotlight 360
+      </a>
+      <p class="footer-note">Opening Spotlight 360 application...</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600');
+  res.send(html);
+}
+
+// Reel sharing aliases
+apiRouter.get('/reel/:id', handleReelSharePreview);
+apiRouter.get('/r/:id', handleReelSharePreview);
+apiRouter.get('/watch/:id', handleReelSharePreview);
+apiRouter.get('/share/:id', handleReelSharePreview);
+
 apiRouter.patch('/posts/:id', async (req: Request, res: Response) => {
   const postId = req.params.id as string;
   const updates = req.body;

@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { apiRouter } from './routes/api.js';
+import { apiRouter, handleReelSharePreview } from './routes/api.js';
 import { authRouter } from './routes/auth.js';
 import { marketplaceRouter } from './routes/marketplace.js';
 import { testDbConnection } from './config/db.js';
@@ -75,6 +75,9 @@ app.use('/api/marketplace', marketplaceRouter);
 
 // Mount core API routes under /api
 app.use('/api', apiRouter);
+
+// Public Rich Reel Open Graph Preview routes (for WhatsApp, Instagram, Telegram, Twitter)
+app.get(['/reel/:id', '/r/:id', '/watch/:id', '/share/:id'], handleReelSharePreview);
 
 // Root informational endpoint
 app.get('/', (_req, res) => {
