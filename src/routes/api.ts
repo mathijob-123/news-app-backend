@@ -941,9 +941,35 @@ export async function handleReelSharePreview(req: Request, res: Response) {
       ? post.thumbnailUrl
       : 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=1080&auto=format&fit=crop';
   const mediaUrl = post?.mediaUrl && !post.mediaUrl.startsWith('blob:') ? post.mediaUrl : '';
-  const frontendUrl = 'https://news-app-frontend-mathis-projects-a3546874.vercel.app';
-  const redirectTarget = `${frontendUrl}?post=${encodeURIComponent(postId || '')}`;
-  const canonicalUrl = `https://news-app-backend-mathis-projects-a3546874.vercel.app/reel/${encodeURIComponent(postId || '')}`;
+
+  // Dynamically resolve the public canonical domain for Open Graph tags, canonical link, and redirection
+  let publicDomain = '';
+
+  // 1. Check CUSTOM_DOMAIN or FRONTEND_URL environment variables
+  if (process.env.CUSTOM_DOMAIN && process.env.CUSTOM_DOMAIN.trim()) {
+    publicDomain = process.env.CUSTOM_DOMAIN.trim().replace(/\/+$/, '');
+  } else if (process.env.FRONTEND_URL && process.env.FRONTEND_URL.trim()) {
+    publicDomain = process.env.FRONTEND_URL.trim().replace(/\/+$/, '');
+  }
+
+  // 2. Dynamically extract from incoming request host headers (Vercel rewrites forward x-forwarded-host)
+  if (!publicDomain) {
+    const rawForwarded = (req.headers['x-forwarded-host'] as string) || '';
+    const hostHeader = (rawForwarded.split(',')[0] || (req.headers.host as string) || '').trim();
+    const proto = ((req.headers['x-forwarded-proto'] as string) || 'https').split(',')[0].trim();
+
+    if (hostHeader && !hostHeader.includes('localhost') && !hostHeader.includes('127.0.0.1')) {
+      publicDomain = `${proto}://${hostHeader}`;
+    }
+  }
+
+  // 3. Fallback default
+  if (!publicDomain) {
+    publicDomain = 'https://news-app-frontend-mathis-projects-a3546874.vercel.app';
+  }
+
+  const redirectTarget = `${publicDomain}?post=${encodeURIComponent(postId || '')}`;
+  const canonicalUrl = `${publicDomain}/reel/${encodeURIComponent(postId || '')}`;
 
   const html = `<!DOCTYPE html>
 <html lang="en">

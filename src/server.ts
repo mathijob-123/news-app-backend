@@ -15,8 +15,15 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim().replace(/\/+$/, ''))
   : ['http://localhost:5173', 'http://localhost:3000'];
+
+if (process.env.CUSTOM_DOMAIN) {
+  const customOrigin = process.env.CUSTOM_DOMAIN.trim().replace(/\/+$/, '');
+  if (!allowedOrigins.includes(customOrigin)) {
+    allowedOrigins.push(customOrigin);
+  }
+}
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -26,7 +33,8 @@ app.use(cors({
       allowedOrigins.includes('*') ||
       allowedOrigins.includes(origin) ||
       /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
-      /\.vercel\.app$/.test(origin)
+      /\.vercel\.app$/.test(origin) ||
+      (process.env.CUSTOM_DOMAIN && origin === process.env.CUSTOM_DOMAIN.trim().replace(/\/+$/, ''))
     ) {
       return callback(null, true);
     }
