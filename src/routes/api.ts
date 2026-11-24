@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { pool } from '../config/db.js';
@@ -55,6 +56,25 @@ const hasDb = Boolean(process.env.DATABASE_URL);
 // Supabase REST Endpoint & Anon Key for serverless resilience
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xylbmwffyaoojnvrjmlx.supabase.co';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh5bGJtd2ZmeWFvb2pudnJqbWx4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ3MTk4MzYsImV4cCI6MjExMDI5NTgzNn0._hBoUkJRX9y84qa9lPnFNFDx5OzidF5hKQ0c3Rft_BQ';
+const JWT_SECRET = process.env.JWT_SECRET || 'spotlight_super_secret_jwt_key_2026_hyperlocal_news';
+
+function getUserIdFromRequest(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const decoded: any = jwt.verify(token, JWT_SECRET);
+      if (decoded && decoded.id) return decoded.id;
+    } catch {}
+  }
+  if (req.query.userId && typeof req.query.userId === 'string') {
+    return req.query.userId;
+  }
+  if (req.body && req.body.userId && typeof req.body.userId === 'string') {
+    return req.body.userId;
+  }
+  return null;
+}
 
 // Detect cryptic filename hashes like Instagram CDN IDs (e.g. AQPI2ClckX...) or random alphanumeric strings
 function isCrypticHash(text?: string | null): boolean {
@@ -2097,70 +2117,333 @@ apiRouter.post('/creators', async (req: Request, res: Response) => {
 });
 
 // --- WALLET & TRANSACTIONS ROUTES ---
-apiRouter.get('/wallet', async (_req: Request, res: Response) => {
+apiRouter.get('/wallet', async (req: Request, res: Response) => {
+  const userId = getUserIdFromRequest(req);
+  const supaHeaders = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+  };
+
+  if (userId) {
+    if (hasDb) {
+      try {
+        const wRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1 LIMIT 1', [userId]);
+        if (wRes.rows.length > 0) {
+          const tRes = await pool.query(
+            'SELECT * FROM transactions WHERE wallet_id = $1 ORDER BY created_at DESC',
+            [wRes.rows[0].id]
+          ).catch(() => ({ rows: [] }));
+          return res.json({
+            success: true,
+            data: mapWalletRow(wRes.rows[0]),
+            transactions: (tRes.rows || []).map(mapTransactionRow),
+            source: 'supabase_postgres_user'
+          });
+        }
+      } catch (err: any) {
+        console.warn('[DB User Wallet Error]:', err.message);
+      }
+    }
+
+    // Supabase REST fallback for authenticated user
+    try {
+      const sRes = await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${encodeURIComponent(userId)}&limit=1`, {
+        headers: supaHeaders
+      });
+      if (sRes.ok) {
+        const rows: any = await sRes.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          return res.json({
+            success: true,
+            data: mapWalletRow(rows[0]),
+            transactions: [],
+            source: 'supabase_rest_user'
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Supabase REST User Wallet Error]:', err.message);
+    }
+  }
+
+  // Generic fallback if not logged in
   if (hasDb) {
     try {
       const wRes = await pool.query('SELECT * FROM wallets LIMIT 1');
-      const tRes = await pool.query('SELECT * FROM transactions ORDER BY created_at DESC');
       if (wRes.rows.length > 0) {
         return res.json({
           success: true,
           data: mapWalletRow(wRes.rows[0]),
-          transactions: tRes.rows.map(mapTransactionRow),
-          source: 'supabase_postgres'
+          transactions: [],
+          source: 'supabase_postgres_default'
         });
       }
-    } catch (err: any) {
-      console.warn('[DB Wallet Error]:', err.message);
-    }
+    } catch {}
   }
   res.json({ success: true, data: memWallet, transactions: memTransactions, source: 'in_memory' });
 });
 
-apiRouter.post('/wallet/payout', async (req: Request, res: Response) => {
-  const { amount, method } = req.body;
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ success: false, error: 'Invalid payout amount' });
+// User points redemption endpoint with UPI or Bank details
+apiRouter.post('/wallet/redeem', async (req: Request, res: Response) => {
+  const userId = getUserIdFromRequest(req);
+  const {
+    amount,
+    methodType = 'upi',
+    upiId,
+    accountHolderName,
+    accountNumber,
+    ifscCode,
+    bankName,
+    phone,
+    userName,
+    userHandle,
+    userEmail
+  } = req.body;
+
+  const pts = Number(amount);
+  if (isNaN(pts) || pts <= 0) {
+    return res.status(400).json({ success: false, error: 'Invalid redemption points amount' });
   }
 
-  const txId = `tx_${Date.now()}`;
-  if (hasDb) {
-    try {
-      const wRes = await pool.query('SELECT * FROM wallets LIMIT 1');
-      if (wRes.rows.length > 0) {
-        const wallet = mapWalletRow(wRes.rows[0]);
-        if (amount > wallet.balance) {
-          return res.status(400).json({ success: false, error: 'Insufficient balance' });
-        }
-        await pool.query('UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE id = $2', [amount, wallet.id]);
-        await pool.query(
-          `INSERT INTO transactions (id, wallet_id, type, amount, status, method, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-          [txId, wallet.id, 'payout', amount, 'completed', method || 'UPI Direct']
-        );
-        wallet.balance -= amount;
-        return res.json({ success: true, data: wallet, transactionId: txId });
-      }
-    } catch (err: any) {
-      console.warn('[DB Payout Error]:', err.message);
+  if (methodType === 'upi' && !upiId?.trim()) {
+    return res.status(400).json({ success: false, error: 'Please enter a valid UPI ID (e.g. name@okhdfcbank)' });
+  }
+
+  if (methodType === 'bank') {
+    if (!accountNumber?.trim() || !ifscCode?.trim() || !accountHolderName?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please fill in Account Holder Name, Account Number, and IFSC Code'
+      });
     }
   }
 
-  if (amount > memWallet.balance) {
-    return res.status(400).json({ success: false, error: 'Insufficient balance' });
-  }
-  memWallet.balance -= amount;
-  const newTx: Transaction = {
-    id: txId,
-    walletId: memWallet.id,
-    type: 'payout',
-    amount,
-    status: 'completed',
-    createdAt: new Date().toISOString(),
-    method: method || 'UPI Direct'
+  const supaHeaders = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    'Content-Type': 'application/json'
   };
-  memTransactions.unshift(newTx);
-  res.json({ success: true, data: memWallet, transaction: newTx });
+
+  try {
+    let currentWallet: any = null;
+    let effectiveUserId = userId || req.body.userId;
+
+    if (effectiveUserId) {
+      if (hasDb) {
+        try {
+          const wRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1 LIMIT 1', [effectiveUserId]);
+          if (wRes.rows.length > 0) currentWallet = wRes.rows[0];
+        } catch {}
+      }
+      if (!currentWallet) {
+        try {
+          const sRes = await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${encodeURIComponent(effectiveUserId)}&limit=1`, {
+            headers: supaHeaders
+          });
+          if (sRes.ok) {
+            const rows: any = await sRes.json();
+            if (Array.isArray(rows) && rows.length > 0) currentWallet = rows[0];
+          }
+        } catch {}
+      }
+    }
+
+    // If still no wallet, fallback to in-memory
+    if (!currentWallet && !effectiveUserId) {
+      currentWallet = memWallet;
+    }
+
+    if (!currentWallet) {
+      return res.status(404).json({ success: false, error: 'User wallet not found' });
+    }
+
+    const availableBalance = Number(currentWallet.balance || 0);
+    if (pts > availableBalance) {
+      return res.status(400).json({
+        success: false,
+        error: `Insufficient points balance. Available: ${Math.round(availableBalance)} Pts, requested: ${pts} Pts`
+      });
+    }
+
+    const newBalance = Math.max(0, availableBalance - pts);
+    const redemptionId = `rdm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    // 1. Deduct balance in DB & Supabase REST
+    if (hasDb && currentWallet.id) {
+      try {
+        await pool.query('UPDATE wallets SET balance = $1, updated_at = NOW() WHERE id = $2', [newBalance, currentWallet.id]);
+      } catch (err: any) {
+        console.warn('[DB Wallet Deduct Error]:', err.message);
+      }
+    }
+    if (currentWallet.id) {
+      try {
+        await fetch(`${SUPABASE_URL}/rest/v1/wallets?id=eq.${encodeURIComponent(currentWallet.id)}`, {
+          method: 'PATCH',
+          headers: supaHeaders,
+          body: JSON.stringify({ balance: newBalance, updated_at: new Date().toISOString() })
+        });
+      } catch {}
+    }
+
+    // 2. Fetch user metadata if not provided
+    let finalUserName = userName || 'Creator';
+    let finalUserHandle = userHandle || 'creator';
+    let finalUserEmail = userEmail || '';
+
+    if ((!finalUserEmail || finalUserName === 'Creator') && effectiveUserId) {
+      try {
+        const uRes = await pool.query('SELECT display_name, handle, email FROM users WHERE id = $1 LIMIT 1', [effectiveUserId]);
+        if (uRes.rows.length > 0) {
+          finalUserName = uRes.rows[0].display_name || finalUserName;
+          finalUserHandle = uRes.rows[0].handle || finalUserHandle;
+          finalUserEmail = uRes.rows[0].email || finalUserEmail;
+        }
+      } catch {}
+    }
+
+    // 3. Insert into redemption_requests
+    const redemptionRow = {
+      id: redemptionId,
+      user_id: effectiveUserId || 'anonymous',
+      user_name: finalUserName,
+      user_handle: finalUserHandle,
+      user_email: finalUserEmail,
+      amount: pts,
+      method_type: methodType,
+      upi_id: methodType === 'upi' ? upiId?.trim() : null,
+      account_holder_name: methodType === 'bank' ? accountHolderName?.trim() : null,
+      account_number: methodType === 'bank' ? accountNumber?.trim() : null,
+      ifsc_code: methodType === 'bank' ? ifscCode?.trim()?.toUpperCase() : null,
+      bank_name: methodType === 'bank' ? bankName?.trim() : null,
+      phone: phone?.trim() || null,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    if (hasDb) {
+      try {
+        await pool.query(
+          `INSERT INTO redemption_requests (
+            id, user_id, user_name, user_handle, user_email, amount,
+            method_type, upi_id, account_holder_name, account_number,
+            ifsc_code, bank_name, phone, status, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())`,
+          [
+            redemptionRow.id,
+            redemptionRow.user_id,
+            redemptionRow.user_name,
+            redemptionRow.user_handle,
+            redemptionRow.user_email,
+            redemptionRow.amount,
+            redemptionRow.method_type,
+            redemptionRow.upi_id,
+            redemptionRow.account_holder_name,
+            redemptionRow.account_number,
+            redemptionRow.ifsc_code,
+            redemptionRow.bank_name,
+            redemptionRow.phone,
+            redemptionRow.status
+          ]
+        );
+      } catch (err: any) {
+        console.warn('[DB Insert Redemption Error]:', err.message);
+      }
+    }
+
+    try {
+      await fetch(`${SUPABASE_URL}/rest/v1/redemption_requests`, {
+        method: 'POST',
+        headers: supaHeaders,
+        body: JSON.stringify(redemptionRow)
+      });
+    } catch (restErr: any) {
+      console.warn('[Supabase REST Insert Redemption Error]:', restErr.message);
+    }
+
+    currentWallet.balance = newBalance;
+
+    return res.json({
+      success: true,
+      message: `Redemption request of ${pts} points submitted successfully via ${methodType === 'upi' ? 'UPI (' + upiId + ')' : 'Bank Transfer'}`,
+      data: mapWalletRow(currentWallet),
+      redemptionId
+    });
+  } catch (err: any) {
+    console.error('[Redemption Error]:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Backwards-compatible payout endpoint (redirects to redeem)
+apiRouter.post('/wallet/payout', async (req: Request, res: Response) => {
+  const { amount, method } = req.body;
+  const isBank = method && (method.toLowerCase().includes('bank') || method.toLowerCase().includes('imps'));
+  req.body.methodType = isBank ? 'bank' : 'upi';
+  if (isBank) {
+    req.body.accountHolderName = req.body.accountHolderName || 'Account Holder';
+    req.body.accountNumber = req.body.accountNumber || '•••• 5021';
+    req.body.ifscCode = req.body.ifscCode || 'IBKL0000001';
+  } else {
+    req.body.upiId = req.body.upiId || method || 'upi@direct';
+  }
+  // forward to redeem handler logic directly
+  const redeemHandler: any = (apiRouter as any).stack.find((s: any) => s.route?.path === '/wallet/redeem')?.route?.stack[0]?.handle;
+  if (redeemHandler) {
+    return redeemHandler(req, res);
+  }
+  res.json({ success: true, message: 'Payout requested' });
+});
+
+// Admin list all redemption requests
+apiRouter.get('/admin/redemptions', async (_req: Request, res: Response) => {
+  const supaHeaders = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+  };
+  if (hasDb) {
+    try {
+      const rRes = await pool.query('SELECT * FROM redemption_requests ORDER BY created_at DESC');
+      if (rRes.rows.length > 0) {
+        return res.json({ success: true, data: rRes.rows });
+      }
+    } catch {}
+  }
+  try {
+    const sRes = await fetch(`${SUPABASE_URL}/rest/v1/redemption_requests?order=created_at.desc`, { headers: supaHeaders });
+    if (sRes.ok) {
+      const rows = await sRes.json();
+      return res.json({ success: true, data: rows });
+    }
+  } catch {}
+  res.json({ success: true, data: [] });
+});
+
+// Admin update redemption status
+apiRouter.post('/admin/redemptions/:id/status', async (req: Request, res: Response) => {
+  const id = req.params.id as string;
+  const { status = 'approved', adminNotes = '' } = req.body;
+  const supaHeaders = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    'Content-Type': 'application/json'
+  };
+
+  if (hasDb) {
+    try {
+      await pool.query('UPDATE redemption_requests SET status = $1, admin_notes = $2, updated_at = NOW() WHERE id = $3', [status, adminNotes, id]);
+    } catch {}
+  }
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/redemption_requests?id=eq.${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: supaHeaders,
+      body: JSON.stringify({ status, admin_notes: adminNotes, updated_at: new Date().toISOString() })
+    });
+  } catch {}
+
+  res.json({ success: true, message: `Redemption status updated to ${status}` });
 });
 
 // --- COMMENTS ROUTES ---
