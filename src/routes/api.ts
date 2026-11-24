@@ -540,6 +540,13 @@ apiRouter.post('/upload/direct', async (req: Request, res: Response) => {
     const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
     const buffer = Buffer.from(cleanBase64, 'base64');
 
+    if (!buffer || buffer.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Uploaded media file is empty (0 bytes). Cannot upload empty payload.'
+      });
+    }
+
     await r2Client.send(
       new PutObjectCommand({
         Bucket: R2_BUCKET_NAME,
