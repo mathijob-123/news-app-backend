@@ -5,6 +5,16 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { pool } from '../config/db.js';
 import { r2Client, R2_BUCKET_NAME, R2_PUBLIC_URL, isR2Configured } from '../config/r2.js';
 import {
+  getGlobalAppSettings,
+  saveGlobalAppSettings,
+  getNotificationRecipientConfig
+} from '../services/settingsService.js';
+import {
+  validateEmailAddress,
+  sendTestNotificationEmail,
+  isSmtpConfigured
+} from '../services/emailService.js';
+import {
   CURRENT_USER,
   INITIAL_POSTS,
   INITIAL_WALLET,
@@ -3002,44 +3012,214 @@ apiRouter.post('/ads/:id/click', async (req: Request, res: Response) => {
 // --- APP SETTINGS & ADMIN ROLES ROUTES ---
 // ==========================================
 
-// 8. Get App Settings
-apiRouter.get('/settings', async (_req: Request, res: Response) => {
-  if (hasDb) {
-    try {
-      const result = await pool.query("SELECT value FROM app_settings WHERE key = 'global_settings'");
-      if (result.rows.length > 0) {
-        const dbSettings = result.rows[0].value;
-        memSettings = { ...memSettings, ...dbSettings };
-        return res.json({ success: true, data: memSettings, source: 'supabase_postgres' });
-      }
-    } catch (err: any) {
-      console.warn('[DB Settings Query Error]:', err.message);
-    }
-  }
+const ADMIN_EMAILS_SET = new Set(
+  [
+    (process.env.ADMIN_EMAIL || '').toLowerCase().trim(),
+    'jrinfotechponneri@gmail.com',
+    '192524027.simats@saveetha.com'
+  ].filter(Boolean)
+);
 
-  res.json({ success: true, data: memSettings, source: 'in_memory' });
+function verifyAdminRequest(req: Request): { authorized: boolean; adminEmail?: string; reason?: string } {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { authorized: false, reason: 'Admin authorization token is required.' };
+  }
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded: any = jwt.verify(token, JWT_SECRET);
+    const email = typeof decoded?.email === 'string' ? decoded.email.toLowerCase().trim() : '';
+    if (decoded?.role === 'admin' || (email && ADMIN_EMAILS_SET.has(email))) {
+      return { authorized: true, adminEmail: email || decoded.handle || 'admin' };
+    }
+    return { authorized: false, reason: 'Insufficient permissions. Admin role required.' };
+  } catch {
+    return { authorized: false, reason: 'Invalid or expired admin session token.' };
+  }
+}
+
+// 8. Get App Settings (Supabase REST primary + Postgres fallback)
+apiRouter.get('/settings', async (_req: Request, res: Response) => {
+  try {
+    const { settings, source } = await getGlobalAppSettings();
+    return res.json({ success: true, data: settings, source });
+  } catch (err: any) {
+    console.warn('[DB Settings Query Error]:', err?.message || err);
+    return res.json({ success: true, data: memSettings, source: 'in_memory' });
+  }
 });
 
-// 9. Update App Settings
+// 9. Update App Settings (validates notification recipient email & requires admin auth for notification recipient updates)
 apiRouter.put('/settings', async (req: Request, res: Response) => {
-  const updates = req.body;
-  memSettings = { ...memSettings, ...updates };
+  try {
+    const updates = req.body || {};
 
-  if (hasDb) {
-    try {
-      await pool.query(
-        `INSERT INTO app_settings (key, value, updated_at)
-         VALUES ('global_settings', $1, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-        [JSON.stringify(memSettings)]
-      );
-      return res.json({ success: true, data: memSettings, source: 'supabase_postgres' });
-    } catch (err: any) {
-      console.warn('[DB Settings Update Error]:', err.message);
+    if (updates?.notifications?.notificationRecipientEmail !== undefined) {
+      const adminCheck = verifyAdminRequest(req);
+      if (!adminCheck.authorized) {
+        return res.status(403).json({ success: false, error: adminCheck.reason });
+      }
+      const rawRecipient = String(updates.notifications.notificationRecipientEmail || '').trim();
+      if (rawRecipient) {
+        const check = validateEmailAddress(rawRecipient);
+        if (!check.valid) {
+          return res.status(400).json({
+            success: false,
+            error: `Invalid notification recipient email: ${check.reason}`
+          });
+        }
+        updates.notifications.notificationRecipientEmail = check.email;
+      } else {
+        updates.notifications.notificationRecipientEmail = '';
+      }
     }
+
+    if (updates?.branding?.supportEmail !== undefined) {
+      const rawSupport = String(updates.branding.supportEmail || '').trim();
+      if (rawSupport) {
+        const supportCheck = validateEmailAddress(rawSupport);
+        if (!supportCheck.valid && !rawSupport.endsWith('.local')) {
+          return res.status(400).json({
+            success: false,
+            error: `Invalid support email: ${supportCheck.reason}`
+          });
+        }
+      }
+    }
+
+    const { settings, source } = await saveGlobalAppSettings(updates);
+    memSettings = settings;
+    return res.json({ success: true, data: settings, source });
+  } catch (err: any) {
+    console.warn('[DB Settings Update Error]:', err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to save settings' });
+  }
+});
+
+// 9B. Send Test Email Notification (Authorized Admin Only)
+apiRouter.post('/admin/email/test', async (req: Request, res: Response) => {
+  const adminCheck = verifyAdminRequest(req);
+  if (!adminCheck.authorized) {
+    return res.status(403).json({ success: false, error: adminCheck.reason });
   }
 
-  res.json({ success: true, data: memSettings, source: 'in_memory' });
+  try {
+    if (!isSmtpConfigured()) {
+      return res.status(500).json({
+        success: false,
+        error: 'Hostinger SMTP credentials are not configured on the backend.'
+      });
+    }
+
+    const config = await getNotificationRecipientConfig();
+    const targetRaw =
+      typeof req.body?.recipientEmail === 'string' && req.body.recipientEmail.trim()
+        ? req.body.recipientEmail.trim()
+        : config.adminRecipientEmail;
+
+    const emailCheck = validateEmailAddress(targetRaw);
+    if (!emailCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot send test email: ${emailCheck.reason}`,
+        code: 'INVALID_RECIPIENT'
+      });
+    }
+
+    const result = await sendTestNotificationEmail({
+      to: emailCheck.email,
+      triggeredBy: adminCheck.adminEmail || 'Bureau SuperAdmin'
+    });
+
+    if (!result.ok) {
+      const statusCode =
+        result.errorCode === 'RECIPIENT_NOT_FOUND' ||
+        result.errorCode === 'RECIPIENT_REJECTED' ||
+        result.errorCode === 'INVALID_RECIPIENT'
+          ? 400
+          : 502;
+      return res.status(statusCode).json({
+        success: false,
+        recipient: result.recipient,
+        code: result.errorCode,
+        error: result.userMessage || result.errorMessage || 'Failed to deliver test email.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      recipient: result.recipient,
+      messageId: result.messageId,
+      message: `Test email sent successfully to ${result.recipient}`
+    });
+  } catch (err: any) {
+    console.error('[Admin Test Email Error]:', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Unexpected error sending test email'
+    });
+  }
+});
+
+// 9C. Audit Stored User Email Addresses (Read-Only, Does Not Modify User Records)
+apiRouter.get('/admin/email/audit', async (req: Request, res: Response) => {
+  const adminCheck = verifyAdminRequest(req);
+  if (!adminCheck.authorized) {
+    return res.status(403).json({ success: false, error: adminCheck.reason });
+  }
+
+  try {
+    let rows: any[] = [];
+    try {
+      const supaRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/users?select=id,handle,display_name,email,role,auth_provider&order=created_at.desc`,
+        {
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+          }
+        }
+      );
+      if (supaRes.ok) {
+        const parsed = await supaRes.json();
+        if (Array.isArray(parsed)) rows = parsed;
+      }
+    } catch {}
+
+    if (rows.length === 0 && hasDb) {
+      try {
+        const dbRes = await pool.query(
+          'SELECT id, handle, display_name, email, role, auth_provider FROM users ORDER BY created_at DESC'
+        );
+        rows = dbRes.rows;
+      } catch {}
+    }
+
+    const invalidUsers = rows
+      .map((u) => {
+        const check = validateEmailAddress(u.email);
+        if (check.valid) return null;
+        return {
+          id: u.id,
+          handle: u.handle,
+          displayName: u.display_name,
+          email: u.email || '',
+          role: u.role,
+          reason: check.reason
+        };
+      })
+      .filter(Boolean);
+
+    return res.json({
+      success: true,
+      totalUsers: rows.length,
+      invalidCount: invalidUsers.length,
+      invalidUsers
+    });
+  } catch (err: any) {
+    console.error('[Admin Email Audit Error]:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to audit emails' });
+  }
 });
 
 apiRouter.get('/admin/users', async (_req: Request, res: Response) => {

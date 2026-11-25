@@ -234,7 +234,10 @@ export const INITIAL_APP_SETTINGS: AppSettings = {
     reportApprovalAlerts: true,
     payoutAlerts: true,
     soundEnabled: true,
-    fcmServerKeyConfigured: true
+    fcmServerKeyConfigured: true,
+    notificationRecipientEmail: 'jrinfotechponneri@gmail.com',
+    adminNewUserEmailAlerts: true,
+    userEmailNotificationsEnabled: true
   },
   advertisements: {
     globalAdsEnabled: true,

@@ -6,7 +6,14 @@ import { OAuth2Client } from 'google-auth-library';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { pool } from '../config/db.js';
 import { r2Client, R2_BUCKET_NAME, R2_PUBLIC_URL, isR2Configured } from '../config/r2.js';
-import { sendWelcomeEmail, sendPasswordResetEmail, sendLoginAlertEmail } from '../services/emailService.js';
+import {
+  sendWelcomeEmail,
+  sendPasswordResetEmail,
+  sendLoginAlertEmail,
+  sendAdminNewUserNotificationEmail,
+  validateEmailAddress
+} from '../services/emailService.js';
+import { getNotificationRecipientConfig } from '../services/settingsService.js';
 import type { User, UserRole, AuthResponse } from '../types.js';
 
 export const authRouter = Router();
@@ -120,7 +127,15 @@ authRouter.post('/register', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
 
-    const cleanEmail = email.toLowerCase().trim();
+    const emailCheck = validateEmailAddress(email);
+    if (!emailCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        error: emailCheck.reason || 'Please enter a valid email address (e.g. name@example.com).'
+      });
+    }
+
+    const cleanEmail = emailCheck.email;
     const cleanPhone = String(phone).trim().replace(/[^0-9+]/g, '');
     let cleanHandle = (handle || displayName.toLowerCase().replace(/[^a-z0-9_]/g, '_'))
       .replace(/^@+/, '')
@@ -302,16 +317,42 @@ authRouter.post('/register', async (req: Request, res: Response) => {
     const createdUser = mapUserRow(createdUserRow);
     const token = generateToken(createdUser);
 
-    if (createdUser.email) {
-      try {
-        await sendWelcomeEmail({
+    try {
+      const notifConfig = await getNotificationRecipientConfig();
+      if (notifConfig.userEmailNotificationsEnabled && createdUser.email) {
+        const welcomeRes = await sendWelcomeEmail({
           to: createdUser.email,
           displayName: createdUser.displayName,
           handle: createdUser.handle
         });
-      } catch (mailErr: any) {
-        console.warn('[Auth Register Welcome Email Warning]:', mailErr?.message || mailErr);
+        if (!welcomeRes.ok && !welcomeRes.skipped) {
+          console.warn(
+            `[Auth Register Welcome Email Warning] recipient=${welcomeRes.recipient} code=${welcomeRes.errorCode} error=${welcomeRes.errorMessage}`
+          );
+        }
       }
+
+      if (
+        notifConfig.adminNewUserEmailAlerts &&
+        notifConfig.adminRecipientValid &&
+        notifConfig.adminRecipientEmail &&
+        notifConfig.adminRecipientEmail !== (createdUser.email || '').toLowerCase()
+      ) {
+        const adminRes = await sendAdminNewUserNotificationEmail({
+          to: notifConfig.adminRecipientEmail,
+          newUserName: createdUser.displayName,
+          newUserEmail: createdUser.email || '',
+          newUserHandle: createdUser.handle,
+          authProvider: 'local'
+        });
+        if (!adminRes.ok && !adminRes.skipped) {
+          console.warn(
+            `[Auth Register Admin Email Warning] recipient=${adminRes.recipient} code=${adminRes.errorCode} error=${adminRes.errorMessage}`
+          );
+        }
+      }
+    } catch (mailErr: any) {
+      console.warn('[Auth Register Email Warning]:', mailErr?.message || mailErr);
     }
 
     console.log(`[Auth API] New user registered: ${createdUser.displayName} (${createdUser.email}) [Role: ${createdUser.role}]`);
@@ -461,12 +502,20 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 
     if (user.email) {
       try {
-        await sendLoginAlertEmail({
-          to: user.email,
-          displayName: user.displayName,
-          handle: user.handle,
-          loginMethod: 'Email / Password'
-        });
+        const notifConfig = await getNotificationRecipientConfig();
+        if (notifConfig.userEmailNotificationsEnabled) {
+          const loginEmailRes = await sendLoginAlertEmail({
+            to: user.email,
+            displayName: user.displayName,
+            handle: user.handle,
+            loginMethod: 'Email / Password'
+          });
+          if (!loginEmailRes.ok && !loginEmailRes.skipped) {
+            console.warn(
+              `[Auth Login Email Warning] recipient=${loginEmailRes.recipient} code=${loginEmailRes.errorCode} error=${loginEmailRes.errorMessage}`
+            );
+          }
+        }
       } catch (mailErr: any) {
         console.warn('[Auth Login Email Warning]:', mailErr?.message || mailErr);
       }
@@ -500,11 +549,15 @@ authRouter.post('/login', async (req: Request, res: Response) => {
 authRouter.post('/forgot-password', async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-      return res.status(400).json({ success: false, error: 'Please enter a valid email address.' });
+    const emailCheck = validateEmailAddress(typeof email === 'string' ? email : '');
+    if (!emailCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        error: emailCheck.reason || 'Please enter a valid email address.'
+      });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
+    const cleanEmail = emailCheck.email;
 
     // Find user via Supabase REST first, then Pool fallback
     let userRow: any = null;
@@ -606,17 +659,24 @@ authRouter.post('/forgot-password', async (req: Request, res: Response) => {
     ).replace(/\/+$/, '');
     const resetUrl = `${frontendBase}/?resetToken=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(cleanEmail)}`;
 
-    const emailSent = await sendPasswordResetEmail({
+    const emailResult = await sendPasswordResetEmail({
       to: cleanEmail,
       displayName: userRow.display_name || userRow.handle || 'User',
       otp,
       resetUrl
     });
 
-    if (!emailSent) {
-      return res.status(500).json({
+    if (!emailResult.ok) {
+      const statusCode =
+        emailResult.errorCode === 'INVALID_RECIPIENT' ||
+        emailResult.errorCode === 'RECIPIENT_NOT_FOUND' ||
+        emailResult.errorCode === 'RECIPIENT_REJECTED'
+          ? 400
+          : 502;
+      return res.status(statusCode).json({
         success: false,
-        error: 'Email service is not configured on the server.'
+        error: emailResult.userMessage || 'Failed to send password reset email.',
+        code: emailResult.errorCode
       });
     }
 
@@ -1091,12 +1151,20 @@ authRouter.post('/google', async (req: Request, res: Response) => {
 
       if (user.email) {
         try {
-          await sendLoginAlertEmail({
-            to: user.email,
-            displayName: user.displayName,
-            handle: user.handle,
-            loginMethod: 'Google Sign-In'
-          });
+          const notifConfig = await getNotificationRecipientConfig();
+          if (notifConfig.userEmailNotificationsEnabled) {
+            const loginRes = await sendLoginAlertEmail({
+              to: user.email,
+              displayName: user.displayName,
+              handle: user.handle,
+              loginMethod: 'Google Sign-In'
+            });
+            if (!loginRes.ok && !loginRes.skipped) {
+              console.warn(
+                `[Google OAuth Login Email Warning] recipient=${loginRes.recipient} code=${loginRes.errorCode} error=${loginRes.errorMessage}`
+              );
+            }
+          }
         } catch (mailErr: any) {
           console.warn('[Google OAuth Login Email Warning]:', mailErr?.message || mailErr);
         }
@@ -1246,11 +1314,34 @@ authRouter.post('/google', async (req: Request, res: Response) => {
 
       if (user.email) {
         try {
-          await sendWelcomeEmail({
-            to: user.email,
-            displayName: user.displayName,
-            handle: user.handle
-          });
+          const notifConfig = await getNotificationRecipientConfig();
+          if (notifConfig.userEmailNotificationsEnabled) {
+            const welcomeRes = await sendWelcomeEmail({
+              to: user.email,
+              displayName: user.displayName,
+              handle: user.handle
+            });
+            if (!welcomeRes.ok && !welcomeRes.skipped) {
+              console.warn(
+                `[Google OAuth Welcome Email Warning] recipient=${welcomeRes.recipient} code=${welcomeRes.errorCode} error=${welcomeRes.errorMessage}`
+              );
+            }
+          }
+
+          if (
+            notifConfig.adminNewUserEmailAlerts &&
+            notifConfig.adminRecipientValid &&
+            notifConfig.adminRecipientEmail &&
+            notifConfig.adminRecipientEmail !== user.email.toLowerCase()
+          ) {
+            await sendAdminNewUserNotificationEmail({
+              to: notifConfig.adminRecipientEmail,
+              newUserName: user.displayName,
+              newUserEmail: user.email,
+              newUserHandle: user.handle,
+              authProvider: 'google'
+            });
+          }
         } catch (mailErr: any) {
           console.warn('[Google OAuth Welcome Email Warning]:', mailErr?.message || mailErr);
         }
