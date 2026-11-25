@@ -10,8 +10,9 @@ const SMTP_SECURE =
 const SMTP_USER = (process.env.SMTP_USER || '').trim();
 const SMTP_PASS = process.env.SMTP_PASS || '';
 const SMTP_FROM = (
+  process.env.MAIL_FROM ||
   process.env.SMTP_FROM ||
-  (SMTP_USER ? `Spotlight360 <${SMTP_USER}>` : 'Spotlight360 <noreply@spotlight360.in>')
+  (SMTP_USER ? `Spotlight 360 <${SMTP_USER}>` : 'Spotlight 360 <noreply@spotlight360.in>')
 ).trim();
 
 const PLACEHOLDER_DOMAINS = new Set([
