@@ -32,7 +32,7 @@ app.use(cors({
     if (
       allowedOrigins.includes('*') ||
       allowedOrigins.includes(origin) ||
-      /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
       /\.vercel\.app$/.test(origin) ||
       (process.env.CUSTOM_DOMAIN && origin === process.env.CUSTOM_DOMAIN.trim().replace(/\/+$/, ''))
     ) {

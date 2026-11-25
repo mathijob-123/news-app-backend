@@ -175,6 +175,20 @@ export async function runAuthMigration(): Promise<boolean> {
           value JSONB NOT NULL,
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
+
+        -- Ensure password_reset_tokens table exists
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+          id VARCHAR(64) PRIMARY KEY,
+          user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          email VARCHAR(255) NOT NULL,
+          otp_hash TEXT NOT NULL,
+          used BOOLEAN NOT NULL DEFAULT FALSE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_email ON password_reset_tokens(LOWER(email));
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
       `);
       console.log('[Auth Migration] Schema altered successfully (auth columns, video_posts columns, ads, social_media_imports, copyright, notifications & app_settings ensured).');
 

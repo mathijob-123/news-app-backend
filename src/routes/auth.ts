@@ -1,17 +1,22 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { pool } from '../config/db.js';
 import { r2Client, R2_BUCKET_NAME, R2_PUBLIC_URL, isR2Configured } from '../config/r2.js';
+import { sendWelcomeEmail, sendPasswordResetEmail, sendLoginAlertEmail } from '../services/emailService.js';
 import type { User, UserRole, AuthResponse } from '../types.js';
 
 export const authRouter = Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'spotlight_super_secret_jwt_key_2026_hyperlocal_news';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_CLIENT_ID = (
+  process.env.GOOGLE_CLIENT_ID ||
+  '457891409432-iq0h518ncoq89u9mf4h694mluq7v5sem.apps.googleusercontent.com'
+).trim();
+const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
 const ADMIN_EMAILS = [
   (process.env.ADMIN_EMAIL || '').toLowerCase().trim(),
   'jrinfotechponneri@gmail.com',
@@ -297,6 +302,18 @@ authRouter.post('/register', async (req: Request, res: Response) => {
     const createdUser = mapUserRow(createdUserRow);
     const token = generateToken(createdUser);
 
+    if (createdUser.email) {
+      try {
+        await sendWelcomeEmail({
+          to: createdUser.email,
+          displayName: createdUser.displayName,
+          handle: createdUser.handle
+        });
+      } catch (mailErr: any) {
+        console.warn('[Auth Register Welcome Email Warning]:', mailErr?.message || mailErr);
+      }
+    }
+
     console.log(`[Auth API] New user registered: ${createdUser.displayName} (${createdUser.email}) [Role: ${createdUser.role}]`);
 
     const response: AuthResponse = {
@@ -355,6 +372,18 @@ authRouter.post('/login', async (req: Request, res: Response) => {
         walletId: 'wal_admin_jr'
       };
       const token = generateToken(adminUser);
+      if (adminUser.email && adminUser.email.includes('@')) {
+        try {
+          await sendLoginAlertEmail({
+            to: adminUser.email,
+            displayName: adminUser.displayName,
+            handle: adminUser.handle,
+            loginMethod: 'SuperAdmin Email Sign-In'
+          });
+        } catch (mailErr: any) {
+          console.warn('[Auth SuperAdmin Login Email Warning]:', mailErr?.message || mailErr);
+        }
+      }
       return res.json({
         success: true,
         token,
@@ -430,6 +459,19 @@ authRouter.post('/login', async (req: Request, res: Response) => {
       } catch {}
     }
 
+    if (user.email) {
+      try {
+        await sendLoginAlertEmail({
+          to: user.email,
+          displayName: user.displayName,
+          handle: user.handle,
+          loginMethod: 'Email / Password'
+        });
+      } catch (mailErr: any) {
+        console.warn('[Auth Login Email Warning]:', mailErr?.message || mailErr);
+      }
+    }
+
     console.log(`[Auth API] User logged in: ${user.displayName} (${user.email || user.handle}) [Role: ${user.role}]`);
 
     return res.json({
@@ -449,6 +491,286 @@ authRouter.post('/login', async (req: Request, res: Response) => {
       });
     }
     return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// 2B. FORGOT PASSWORD (Send Reset OTP & Link via Hostinger SMTP)
+// ==========================================
+authRouter.post('/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid email address.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Find user via Supabase REST first, then Pool fallback
+    let userRow: any = null;
+    try {
+      const restUsers = await fetchSupabaseRest(`users?email=ilike.${encodeURIComponent(cleanEmail)}&limit=1`);
+      if (Array.isArray(restUsers) && restUsers.length > 0) {
+        userRow = restUsers[0];
+      }
+    } catch (restErr: any) {
+      console.warn('[Forgot Password REST lookup warning]:', restErr?.message || restErr);
+    }
+
+    if (!userRow) {
+      try {
+        const poolRes = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1', [cleanEmail]);
+        if (poolRes.rows.length > 0) {
+          userRow = poolRes.rows[0];
+        }
+      } catch (poolErr: any) {
+        console.warn('[Forgot Password Pool lookup warning]:', poolErr?.message || poolErr);
+      }
+    }
+
+    if (!userRow) {
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email, a 6-digit password reset code has been sent.'
+      });
+    }
+
+    const otp = crypto.randomInt(100000, 1000000).toString();
+    const otpHash = await bcrypt.hash(otp, 10);
+    const tokenId = `prt_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+    // Invalidate previous unused reset tokens for this user
+    try {
+      await fetchSupabaseRest(`password_reset_tokens?user_id=eq.${encodeURIComponent(userRow.id)}&used=eq.false`, {
+        method: 'PATCH',
+        body: JSON.stringify({ used: true })
+      });
+    } catch {}
+    try {
+      await pool.query('UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false', [userRow.id]);
+    } catch {}
+
+    const tokenRecord = {
+      id: tokenId,
+      user_id: userRow.id,
+      email: cleanEmail,
+      otp_hash: otpHash,
+      used: false,
+      expires_at: expiresAt,
+      created_at: new Date().toISOString()
+    };
+
+    let stored = false;
+    try {
+      await fetchSupabaseRest('password_reset_tokens', {
+        method: 'POST',
+        body: JSON.stringify(tokenRecord)
+      });
+      stored = true;
+    } catch (restErr: any) {
+      console.warn('[Forgot Password REST insert warning]:', restErr?.message || restErr);
+    }
+
+    try {
+      await pool.query(
+        `INSERT INTO password_reset_tokens (id, user_id, email, otp_hash, used, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, false, $5, NOW())`,
+        [tokenId, userRow.id, cleanEmail, otpHash, expiresAt]
+      );
+      stored = true;
+    } catch (poolErr: any) {
+      console.warn('[Forgot Password Pool insert warning]:', poolErr?.message || poolErr);
+    }
+
+    if (!stored) {
+      return res.status(503).json({
+        success: false,
+        error: 'Unable to create password reset request right now. Please try again.'
+      });
+    }
+
+    const resetToken = jwt.sign(
+      { id: userRow.id, email: cleanEmail, tokenId, purpose: 'password_reset' },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    const requestOrigin = typeof req.headers.origin === 'string' && !req.headers.origin.startsWith('capacitor://')
+      ? req.headers.origin
+      : '';
+    const frontendBase = (
+      process.env.FRONTEND_URL ||
+      requestOrigin ||
+      'https://news-app-frontend-mathis-projects-a3546874.vercel.app'
+    ).replace(/\/+$/, '');
+    const resetUrl = `${frontendBase}/?resetToken=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(cleanEmail)}`;
+
+    const emailSent = await sendPasswordResetEmail({
+      to: cleanEmail,
+      displayName: userRow.display_name || userRow.handle || 'User',
+      otp,
+      resetUrl
+    });
+
+    if (!emailSent) {
+      return res.status(500).json({
+        success: false,
+        error: 'Email service is not configured on the server.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'A 6-digit password reset code has been sent to your email. Please check your inbox and spam folder.'
+    });
+  } catch (error: any) {
+    console.error('[Forgot Password Error]:', error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to send password reset email. Please try again.'
+    });
+  }
+});
+
+// ==========================================
+// 2C. RESET PASSWORD (Verify OTP or Token & Update Password)
+// ==========================================
+authRouter.post('/reset-password', async (req: Request, res: Response) => {
+  try {
+    const { email, otp, token, newPassword } = req.body;
+
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ success: false, error: 'New password must be at least 6 characters.' });
+    }
+
+    let tokenRow: any = null;
+    let targetUserId = '';
+
+    if (token && typeof token === 'string') {
+      let decoded: any;
+      try {
+        decoded = jwt.verify(token.trim(), JWT_SECRET);
+      } catch {
+        return res.status(400).json({ success: false, error: 'Reset link has expired or is invalid. Please request a new code.' });
+      }
+      if (!decoded || decoded.purpose !== 'password_reset' || !decoded.tokenId) {
+        return res.status(400).json({ success: false, error: 'Invalid password reset token.' });
+      }
+
+      try {
+        const restTokens = await fetchSupabaseRest(
+          `password_reset_tokens?id=eq.${encodeURIComponent(decoded.tokenId)}&used=eq.false&limit=1`
+        );
+        if (Array.isArray(restTokens) && restTokens.length > 0) {
+          tokenRow = restTokens[0];
+        }
+      } catch {}
+
+      if (!tokenRow) {
+        try {
+          const poolRes = await pool.query(
+            'SELECT * FROM password_reset_tokens WHERE id = $1 AND used = false LIMIT 1',
+            [decoded.tokenId]
+          );
+          if (poolRes.rows.length > 0) tokenRow = poolRes.rows[0];
+        } catch {}
+      }
+
+      if (!tokenRow || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+        return res.status(400).json({ success: false, error: 'Reset link has expired or already been used. Please request a new code.' });
+      }
+
+      targetUserId = tokenRow.user_id || decoded.id;
+    } else {
+      if (!email || !otp) {
+        return res.status(400).json({ success: false, error: 'Email and 6-digit verification code are required.' });
+      }
+      const cleanEmail = String(email).trim().toLowerCase();
+      const cleanOtp = String(otp).trim();
+
+      try {
+        const restTokens = await fetchSupabaseRest(
+          `password_reset_tokens?email=ilike.${encodeURIComponent(cleanEmail)}&used=eq.false&order=created_at.desc&limit=1`
+        );
+        if (Array.isArray(restTokens) && restTokens.length > 0) {
+          tokenRow = restTokens[0];
+        }
+      } catch {}
+
+      if (!tokenRow) {
+        try {
+          const poolRes = await pool.query(
+            'SELECT * FROM password_reset_tokens WHERE LOWER(email) = $1 AND used = false ORDER BY created_at DESC LIMIT 1',
+            [cleanEmail]
+          );
+          if (poolRes.rows.length > 0) tokenRow = poolRes.rows[0];
+        } catch {}
+      }
+
+      if (!tokenRow || new Date(tokenRow.expires_at).getTime() <= Date.now()) {
+        return res.status(400).json({ success: false, error: 'Reset code has expired or is invalid. Please request a new code.' });
+      }
+
+      const otpMatches = await bcrypt.compare(cleanOtp, tokenRow.otp_hash);
+      if (!otpMatches) {
+        return res.status(400).json({ success: false, error: 'Incorrect verification code. Please check your email and try again.' });
+      }
+
+      targetUserId = tokenRow.user_id;
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(String(newPassword), salt);
+
+    // Mark token as used
+    try {
+      await fetchSupabaseRest(`password_reset_tokens?id=eq.${encodeURIComponent(tokenRow.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ used: true })
+      });
+    } catch {}
+    try {
+      await pool.query('UPDATE password_reset_tokens SET used = true WHERE id = $1', [tokenRow.id]);
+    } catch {}
+
+    // Update user password_hash
+    let passwordUpdated = false;
+    try {
+      const restUpdated = await fetchSupabaseRest(`users?id=eq.${encodeURIComponent(targetUserId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ password_hash: passwordHash, updated_at: new Date().toISOString() })
+      });
+      if (Array.isArray(restUpdated) && restUpdated.length > 0) {
+        passwordUpdated = true;
+      }
+    } catch (restErr: any) {
+      console.warn('[Reset Password REST update warning]:', restErr?.message || restErr);
+    }
+
+    try {
+      const poolUpdate = await pool.query(
+        'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id',
+        [passwordHash, targetUserId]
+      );
+      if (poolUpdate.rows.length > 0) passwordUpdated = true;
+    } catch (poolErr: any) {
+      console.warn('[Reset Password Pool update warning]:', poolErr?.message || poolErr);
+    }
+
+    if (!passwordUpdated) {
+      return res.status(500).json({ success: false, error: 'Failed to update password. Please try again.' });
+    }
+
+    console.log(`[Auth API] Password reset completed for user ${targetUserId}`);
+
+    return res.json({
+      success: true,
+      message: 'Password reset successfully! You can now sign in with your new password.'
+    });
+  } catch (error: any) {
+    console.error('[Reset Password Error]:', error);
+    return res.status(500).json({ success: false, error: error?.message || 'Failed to reset password.' });
   }
 });
 
@@ -488,6 +810,18 @@ authRouter.post('/admin-login', async (req: Request, res: Response) => {
         walletId: 'wal_admin_jr'
       };
       const token = generateToken(adminUser);
+      if (adminUser.email && adminUser.email.includes('@')) {
+        try {
+          await sendLoginAlertEmail({
+            to: adminUser.email,
+            displayName: adminUser.displayName,
+            handle: adminUser.handle,
+            loginMethod: 'SuperAdmin Email Sign-In'
+          });
+        } catch (mailErr: any) {
+          console.warn('[Auth SuperAdmin Login Email Warning]:', mailErr?.message || mailErr);
+        }
+      }
       return res.json({
         success: true,
         token,
@@ -498,19 +832,41 @@ authRouter.post('/admin-login', async (req: Request, res: Response) => {
       });
     }
 
-    const userRes = await pool.query(
-      'SELECT * FROM users WHERE (LOWER(email) = $1 OR LOWER(handle) = $1) AND (role = \'admin\' OR LOWER(email) = ANY($2::text[]))',
-      [cleanId, ADMIN_EMAILS]
-    );
+    let userRow: any = null;
+    try {
+      const restUsers = await fetchSupabaseRest(
+        `users?or=(email.ilike.${encodeURIComponent(cleanId)},handle.ilike.${encodeURIComponent(cleanId)})&limit=1`
+      );
+      if (Array.isArray(restUsers) && restUsers.length > 0) {
+        const candidate = restUsers[0];
+        if (candidate.role === 'admin' || ADMIN_EMAILS.includes((candidate.email || '').toLowerCase().trim())) {
+          userRow = candidate;
+        }
+      }
+    } catch (restErr: any) {
+      console.warn('[Auth Admin Login REST notice]:', restErr?.message || restErr);
+    }
 
-    if (userRes.rows.length === 0 && !isSuperAdmin) {
+    if (!userRow) {
+      try {
+        const userRes = await pool.query(
+          'SELECT * FROM users WHERE (LOWER(email) = $1 OR LOWER(handle) = $1) AND (role = \'admin\' OR LOWER(email) = ANY($2::text[]))',
+          [cleanId, ADMIN_EMAILS]
+        );
+        if (userRes.rows.length > 0) {
+          userRow = userRes.rows[0];
+        }
+      } catch (poolErr: any) {
+        console.warn('[Auth Admin Login Pool Warning]:', poolErr?.message || poolErr);
+      }
+    }
+
+    if (!userRow && !isSuperAdmin) {
       return res.status(403).json({
         success: false,
         error: 'Access Denied: This identifier does not have platform Bureau Editorial privileges.'
       });
     }
-
-    const userRow = userRes.rows[0];
 
     // Check passcode
     let passwordValid = false;
@@ -582,7 +938,7 @@ authRouter.post('/google', async (req: Request, res: Response) => {
         audience: GOOGLE_CLIENT_ID
       });
       const payload = ticket.getPayload();
-      if (payload) {
+      if (payload && payload.email_verified !== false) {
         googleId = payload.sub;
         email = payload.email?.toLowerCase().trim() || '';
         name = payload.name || 'Google User';
@@ -596,6 +952,14 @@ authRouter.post('/google', async (req: Request, res: Response) => {
         const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
         if (tokenInfoRes.ok) {
           const info = (await tokenInfoRes.json()) as any;
+          const isValidAudience = info.aud === GOOGLE_CLIENT_ID;
+          const isEmailVerified = info.email_verified === true || info.email_verified === 'true';
+          if (!isValidAudience || !isEmailVerified) {
+            return res.status(401).json({
+              success: false,
+              error: 'Google token audience or email verification check failed.'
+            });
+          }
           googleId = info.sub;
           email = (info.email || '').toLowerCase().trim();
           name = info.name || 'Google User';
@@ -628,14 +992,34 @@ authRouter.post('/google', async (req: Request, res: Response) => {
     const isSuperAdmin = isSuperAdminEmail(email);
     const assignedRole: UserRole = isSuperAdmin ? 'admin' : (role === 'admin' ? 'creator' : (role || 'creator'));
 
-    // Check if user already exists in Supabase by google_id or email
-    let userRes = await pool.query(
-      'SELECT * FROM users WHERE google_id = $1 OR LOWER(email) = $2',
-      [googleId, email]
-    );
+    // Check if user already exists in Supabase by google_id or email (REST primary, Pool fallback)
+    let existingRow: any = null;
+    try {
+      const restUsers = await fetchSupabaseRest(
+        `users?or=(google_id.eq.${encodeURIComponent(googleId)},email.ilike.${encodeURIComponent(email)})&limit=1`
+      );
+      if (Array.isArray(restUsers) && restUsers.length > 0) {
+        existingRow = restUsers[0];
+      }
+    } catch (restErr: any) {
+      console.warn('[Google OAuth REST lookup warning]:', restErr?.message || restErr);
+    }
 
-    const isExisting = userRes.rows.length > 0;
-    const existingRow = isExisting ? userRes.rows[0] : null;
+    if (!existingRow) {
+      try {
+        const userRes = await pool.query(
+          'SELECT * FROM users WHERE google_id = $1 OR LOWER(email) = $2 LIMIT 1',
+          [googleId, email]
+        );
+        if (userRes.rows.length > 0) {
+          existingRow = userRes.rows[0];
+        }
+      } catch (poolErr: any) {
+        console.warn('[Google OAuth Pool lookup warning]:', poolErr?.message || poolErr);
+      }
+    }
+
+    const isExisting = Boolean(existingRow);
     const onboardingDone = isExisting ? Boolean(existingRow.onboarding_completed) : false;
 
     let isNewUser = false;
@@ -649,29 +1033,74 @@ authRouter.post('/google', async (req: Request, res: Response) => {
 
     let user: User;
     let walletId: string;
+    let walletData: any = null;
 
     if (isExisting && existingRow) {
       // User exists -> update Google ID, avatar, and ensure role if admin
       const finalRole = isSuperAdmin ? 'admin' : existingRow.role;
       const finalOnboarding = isSuperAdmin ? true : existingRow.onboarding_completed;
+      const finalVerified = finalRole === 'admin' ? true : Boolean(existingRow.verified);
+      const updatedFields = {
+        google_id: existingRow.google_id || googleId,
+        auth_provider: 'google',
+        avatar: picture || existingRow.avatar,
+        display_name: name || existingRow.display_name,
+        role: finalRole,
+        verified: finalVerified,
+        onboarding_completed: finalOnboarding,
+        updated_at: new Date().toISOString()
+      };
 
-      await pool.query(
-        `UPDATE users SET
-          google_id = COALESCE(google_id, $1),
-          auth_provider = 'google',
-          avatar = COALESCE($2, avatar),
-          display_name = COALESCE($3, display_name),
-          role = $4::varchar,
-          verified = CASE WHEN $4::varchar = 'admin' THEN true ELSE verified END,
-          onboarding_completed = COALESCE($5, onboarding_completed),
-          updated_at = NOW()
-         WHERE id = $6`,
-        [googleId, picture || null, name || null, finalRole, finalOnboarding, existingRow.id]
-      );
+      let updatedRow: any = null;
+      try {
+        const restUpdated = await fetchSupabaseRest(`users?id=eq.${encodeURIComponent(existingRow.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify(updatedFields)
+        });
+        if (Array.isArray(restUpdated) && restUpdated.length > 0) {
+          updatedRow = restUpdated[0];
+        }
+      } catch (restErr: any) {
+        console.warn('[Google OAuth REST update warning]:', restErr?.message || restErr);
+      }
 
-      const refreshed = await pool.query('SELECT * FROM users WHERE id = $1', [existingRow.id]);
-      user = mapUserRow(refreshed.rows[0]);
+      try {
+        await pool.query(
+          `UPDATE users SET
+            google_id = COALESCE(google_id, $1),
+            auth_provider = 'google',
+            avatar = COALESCE($2, avatar),
+            display_name = COALESCE($3, display_name),
+            role = $4::varchar,
+            verified = CASE WHEN $4::varchar = 'admin' THEN true ELSE verified END,
+            onboarding_completed = COALESCE($5, onboarding_completed),
+            updated_at = NOW()
+           WHERE id = $6`,
+          [googleId, picture || null, name || null, finalRole, finalOnboarding, existingRow.id]
+        );
+        if (!updatedRow) {
+          const refreshed = await pool.query('SELECT * FROM users WHERE id = $1', [existingRow.id]);
+          if (refreshed.rows.length > 0) updatedRow = refreshed.rows[0];
+        }
+      } catch (poolErr: any) {
+        console.warn('[Google OAuth Pool update warning]:', poolErr?.message || poolErr);
+      }
+
+      user = mapUserRow(updatedRow || { ...existingRow, ...updatedFields });
       walletId = user.walletId;
+
+      if (user.email) {
+        try {
+          await sendLoginAlertEmail({
+            to: user.email,
+            displayName: user.displayName,
+            handle: user.handle,
+            loginMethod: 'Google Sign-In'
+          });
+        } catch (mailErr: any) {
+          console.warn('[Google OAuth Login Email Warning]:', mailErr?.message || mailErr);
+        }
+      }
     } else {
       // New user from Google -> Create user record
       const userId = `usr_g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -680,8 +1109,19 @@ authRouter.post('/google', async (req: Request, res: Response) => {
       if (!handle || handle.length < 3) handle = `reporter_${Date.now().toString(36)}`;
 
       // Ensure unique handle
-      const handleCheck = await pool.query('SELECT id FROM users WHERE LOWER(handle) = $1', [handle]);
-      if (handleCheck.rows.length > 0) {
+      let handleTaken = false;
+      try {
+        const restHandle = await fetchSupabaseRest(`users?handle=ilike.${encodeURIComponent(handle)}&select=id`);
+        if (Array.isArray(restHandle) && restHandle.length > 0) {
+          handleTaken = true;
+        }
+      } catch {
+        try {
+          const handleCheck = await pool.query('SELECT id FROM users WHERE LOWER(handle) = $1', [handle]);
+          if (handleCheck.rows.length > 0) handleTaken = true;
+        } catch {}
+      }
+      if (handleTaken) {
         handle = `${handle}_${Math.floor(100 + Math.random() * 900)}`;
       }
 
@@ -692,54 +1132,150 @@ authRouter.post('/google', async (req: Request, res: Response) => {
         district: 'Chennai'
       };
 
-      await pool.query(
-        `INSERT INTO users (
-          id, handle, display_name, email, role, auth_provider, google_id,
-          avatar, bio, home_location, is_creator, creator_tier,
-          trust_score, verified, follower_count, following_count, wallet_id,
-          onboarding_completed, created_at, updated_at
-        ) VALUES (
-          $1, $2, $3, $4, $5, 'google', $6,
-          $7, $8, $9, $10, $11,
-          100, $12, 0, 0, $13,
-          $14, NOW(), NOW()
-        )`,
-        [
-          userId,
-          handle,
-          name,
-          email,
-          assignedRole,
-          googleId,
-          picture || `https://api.dicebear.com/7.x/bottts/svg?seed=${handle}`,
-          `Verified Google reporter based in Chennai`,
-          JSON.stringify(defaultLocation),
-          assignedRole === 'creator' || assignedRole === 'admin',
-          assignedRole === 'admin' ? 'gold' : 'bronze',
-          true, // Verified via Google
-          walletId,
-          isSuperAdmin // If admin, auto-complete onboarding
-        ]
-      );
+      const newUserPayload = {
+        id: userId,
+        handle,
+        display_name: name,
+        email,
+        role: assignedRole,
+        auth_provider: 'google',
+        google_id: googleId,
+        avatar: picture || `https://api.dicebear.com/7.x/bottts/svg?seed=${handle}`,
+        bio: 'Verified Google reporter based in Chennai',
+        home_location: defaultLocation,
+        is_creator: assignedRole === 'creator' || assignedRole === 'admin',
+        creator_tier: assignedRole === 'admin' ? 'gold' : 'bronze',
+        trust_score: 100,
+        verified: true,
+        follower_count: 0,
+        following_count: 0,
+        wallet_id: walletId,
+        onboarding_completed: isSuperAdmin,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
 
-      // Create linked wallet
-      await pool.query(
-        `INSERT INTO wallets (
-          id, user_id, balance, lifetime_earnings, this_month_earnings,
-          next_payout_date, payout_method, qualified_views_total, updated_at
-        ) VALUES (
-          $1, $2, 0.00, 0.00, 0.00,
-          'Not Scheduled', 'UPI Direct (Not Linked)', 0, NOW()
-        ) ON CONFLICT (id) DO NOTHING`,
-        [walletId, userId]
-      );
+      let createdRow: any = null;
+      try {
+        const restInsert = await fetchSupabaseRest('users', {
+          method: 'POST',
+          body: JSON.stringify(newUserPayload)
+        });
+        if (Array.isArray(restInsert) && restInsert.length > 0) {
+          createdRow = restInsert[0];
+        }
+      } catch (restErr: any) {
+        console.warn('[Google OAuth REST insert warning]:', restErr?.message || restErr);
+      }
 
-      const created = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-      user = mapUserRow(created.rows[0]);
+      try {
+        await pool.query(
+          `INSERT INTO users (
+            id, handle, display_name, email, role, auth_provider, google_id,
+            avatar, bio, home_location, is_creator, creator_tier,
+            trust_score, verified, follower_count, following_count, wallet_id,
+            onboarding_completed, created_at, updated_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, 'google', $6,
+            $7, $8, $9, $10, $11,
+            100, $12, 0, 0, $13,
+            $14, NOW(), NOW()
+          ) ON CONFLICT (id) DO NOTHING`,
+          [
+            userId,
+            handle,
+            name,
+            email,
+            assignedRole,
+            googleId,
+            newUserPayload.avatar,
+            newUserPayload.bio,
+            JSON.stringify(defaultLocation),
+            newUserPayload.is_creator,
+            newUserPayload.creator_tier,
+            true,
+            walletId,
+            isSuperAdmin
+          ]
+        );
+        if (!createdRow) {
+          const created = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+          if (created.rows.length > 0) createdRow = created.rows[0];
+        }
+      } catch (poolErr: any) {
+        console.warn('[Google OAuth Pool insert warning]:', poolErr?.message || poolErr);
+      }
+
+      const walletPayload = {
+        id: walletId,
+        user_id: userId,
+        balance: 0.00,
+        lifetime_earnings: 0.00,
+        this_month_earnings: 0.00,
+        next_payout_date: 'Not Scheduled',
+        payout_method: 'UPI Direct (Not Linked)',
+        qualified_views_total: 0,
+        updated_at: new Date().toISOString()
+      };
+
+      try {
+        const restWallet = await fetchSupabaseRest('wallets', {
+          method: 'POST',
+          body: JSON.stringify(walletPayload)
+        });
+        if (Array.isArray(restWallet) && restWallet.length > 0) {
+          walletData = restWallet[0];
+        }
+      } catch {}
+
+      try {
+        await pool.query(
+          `INSERT INTO wallets (
+            id, user_id, balance, lifetime_earnings, this_month_earnings,
+            next_payout_date, payout_method, qualified_views_total, updated_at
+          ) VALUES (
+            $1, $2, 0.00, 0.00, 0.00,
+            'Not Scheduled', 'UPI Direct (Not Linked)', 0, NOW()
+          ) ON CONFLICT (id) DO NOTHING`,
+          [walletId, userId]
+        );
+      } catch {}
+
+      if (!walletData) walletData = walletPayload;
+      user = mapUserRow(createdRow || newUserPayload);
+
+      if (user.email) {
+        try {
+          await sendWelcomeEmail({
+            to: user.email,
+            displayName: user.displayName,
+            handle: user.handle
+          });
+        } catch (mailErr: any) {
+          console.warn('[Google OAuth Welcome Email Warning]:', mailErr?.message || mailErr);
+        }
+      }
     }
 
     const token = generateToken(user);
-    const walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1 LIMIT 1', [user.id]);
+
+    if (!walletData) {
+      try {
+        const restWallets = await fetchSupabaseRest(`wallets?user_id=eq.${encodeURIComponent(user.id)}&limit=1`);
+        if (Array.isArray(restWallets) && restWallets.length > 0) {
+          walletData = restWallets[0];
+        }
+      } catch {}
+    }
+
+    if (!walletData) {
+      try {
+        const walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1 LIMIT 1', [user.id]);
+        if (walletRes.rows.length > 0) {
+          walletData = walletRes.rows[0];
+        }
+      } catch {}
+    }
 
     console.log(`[Google OAuth Success] User: ${user.displayName} (${user.email}) [Role: ${user.role}] [NewUser: ${isNewUser}] [Admin: ${isSuperAdmin}]`);
 
@@ -747,13 +1283,20 @@ authRouter.post('/google', async (req: Request, res: Response) => {
       success: true,
       token,
       user,
-      wallet: walletRes.rows[0] || null,
+      wallet: walletData || null,
       isAdmin: user.role === 'admin' || isSuperAdmin,
       isNewUser,
       message: `Signed in as ${user.displayName}`
     });
   } catch (error: any) {
     console.error('[Google OAuth Error]:', error);
+    const msg = error?.message || '';
+    if (msg.includes('ECIRCUITBREAKER') || msg.includes('ENOTFOUND') || msg.includes('connection')) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database connection is temporarily busy. Please retry in a few moments.'
+      });
+    }
     return res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -785,19 +1328,50 @@ authRouter.post('/complete-onboarding', async (req: Request, res: Response) => {
       avatar
     } = req.body;
 
-    const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.id]);
-    if (userRes.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User profile not found' });
+    let currentUser: any = null;
+    try {
+      const restUsers = await fetchSupabaseRest(`users?id=eq.${encodeURIComponent(decoded.id)}&limit=1`);
+      if (Array.isArray(restUsers) && restUsers.length > 0) {
+        currentUser = restUsers[0];
+      }
+    } catch (restErr: any) {
+      console.warn('[Onboarding REST lookup warning]:', restErr?.message || restErr);
     }
 
-    const currentUser = userRes.rows[0];
+    if (!currentUser) {
+      try {
+        const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.id]);
+        if (userRes.rows.length > 0) {
+          currentUser = userRes.rows[0];
+        }
+      } catch (poolErr: any) {
+        console.warn('[Onboarding Pool lookup warning]:', poolErr?.message || poolErr);
+      }
+    }
+
+    if (!currentUser) {
+      return res.status(404).json({ success: false, error: 'User profile not found' });
+    }
 
     // Clean & validate handle if provided
     let cleanHandle = currentUser.handle;
     if (handle && handle.trim()) {
       cleanHandle = handle.trim().toLowerCase().replace(/^@+/, '').replace(/[^a-z0-9_]/g, '_').slice(0, 20);
-      const handleCheck = await pool.query('SELECT id FROM users WHERE LOWER(handle) = $1 AND id != $2', [cleanHandle, decoded.id]);
-      if (handleCheck.rows.length > 0) {
+      let handleTaken = false;
+      try {
+        const restHandle = await fetchSupabaseRest(
+          `users?handle=ilike.${encodeURIComponent(cleanHandle)}&id=neq.${encodeURIComponent(decoded.id)}&select=id`
+        );
+        if (Array.isArray(restHandle) && restHandle.length > 0) {
+          handleTaken = true;
+        }
+      } catch {
+        try {
+          const handleCheck = await pool.query('SELECT id FROM users WHERE LOWER(handle) = $1 AND id != $2', [cleanHandle, decoded.id]);
+          if (handleCheck.rows.length > 0) handleTaken = true;
+        } catch {}
+      }
+      if (handleTaken) {
         cleanHandle = `${cleanHandle}_${Math.floor(100 + Math.random() * 900)}`;
       }
     }
@@ -807,34 +1381,82 @@ authRouter.post('/complete-onboarding', async (req: Request, res: Response) => {
 
     const locationData = homeLocation || (currentUser.home_location ? (typeof currentUser.home_location === 'string' ? JSON.parse(currentUser.home_location) : currentUser.home_location) : { lat: 13.0827, lng: 80.2707, placeName: 'Chennai Hub', district: 'Chennai' });
 
-    await pool.query(
-      `UPDATE users SET
-        display_name = COALESCE($1, display_name),
-        handle = COALESCE($2, handle),
-        role = $3::varchar,
-        is_creator = $4,
-        bio = COALESCE($5, bio),
-        home_location = $6,
-        avatar = COALESCE($7, avatar),
-        onboarding_completed = true,
-        updated_at = NOW()
-       WHERE id = $8`,
-      [
-        displayName?.trim() || currentUser.display_name,
-        cleanHandle,
-        assignedRole,
-        isCreator,
-        bio !== undefined ? bio : currentUser.bio,
-        JSON.stringify(locationData),
-        avatar || currentUser.avatar,
-        decoded.id
-      ]
-    );
+    const onboardingPayload = {
+      display_name: displayName?.trim() || currentUser.display_name,
+      handle: cleanHandle,
+      role: assignedRole,
+      is_creator: isCreator,
+      bio: bio !== undefined ? bio : currentUser.bio,
+      home_location: locationData,
+      avatar: avatar || currentUser.avatar,
+      onboarding_completed: true,
+      updated_at: new Date().toISOString()
+    };
 
-    const refreshed = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.id]);
-    const updatedUser = mapUserRow(refreshed.rows[0]);
+    let updatedRow: any = null;
+    try {
+      const restUpdate = await fetchSupabaseRest(`users?id=eq.${encodeURIComponent(decoded.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(onboardingPayload)
+      });
+      if (Array.isArray(restUpdate) && restUpdate.length > 0) {
+        updatedRow = restUpdate[0];
+      }
+    } catch (restErr: any) {
+      console.warn('[Onboarding REST update warning]:', restErr?.message || restErr);
+    }
+
+    try {
+      await pool.query(
+        `UPDATE users SET
+          display_name = COALESCE($1, display_name),
+          handle = COALESCE($2, handle),
+          role = $3::varchar,
+          is_creator = $4,
+          bio = COALESCE($5, bio),
+          home_location = $6,
+          avatar = COALESCE($7, avatar),
+          onboarding_completed = true,
+          updated_at = NOW()
+         WHERE id = $8`,
+        [
+          onboardingPayload.display_name,
+          cleanHandle,
+          assignedRole,
+          isCreator,
+          onboardingPayload.bio,
+          JSON.stringify(locationData),
+          onboardingPayload.avatar,
+          decoded.id
+        ]
+      );
+      if (!updatedRow) {
+        const refreshed = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.id]);
+        if (refreshed.rows.length > 0) updatedRow = refreshed.rows[0];
+      }
+    } catch (poolErr: any) {
+      console.warn('[Onboarding Pool update warning]:', poolErr?.message || poolErr);
+    }
+
+    const updatedUser = mapUserRow(updatedRow || { ...currentUser, ...onboardingPayload });
     const newToken = generateToken(updatedUser);
-    const walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1 LIMIT 1', [updatedUser.id]);
+
+    let walletData: any = null;
+    try {
+      const restWallets = await fetchSupabaseRest(`wallets?user_id=eq.${encodeURIComponent(updatedUser.id)}&limit=1`);
+      if (Array.isArray(restWallets) && restWallets.length > 0) {
+        walletData = restWallets[0];
+      }
+    } catch {}
+
+    if (!walletData) {
+      try {
+        const walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1 LIMIT 1', [updatedUser.id]);
+        if (walletRes.rows.length > 0) {
+          walletData = walletRes.rows[0];
+        }
+      } catch {}
+    }
 
     console.log(`[Onboarding Complete] User: ${updatedUser.displayName} (@${updatedUser.handle}) [Role: ${updatedUser.role}]`);
 
@@ -842,7 +1464,7 @@ authRouter.post('/complete-onboarding', async (req: Request, res: Response) => {
       success: true,
       token: newToken,
       user: updatedUser,
-      wallet: walletRes.rows[0] || null,
+      wallet: walletData || null,
       message: 'Profile onboarding completed successfully!'
     });
   } catch (error: any) {
